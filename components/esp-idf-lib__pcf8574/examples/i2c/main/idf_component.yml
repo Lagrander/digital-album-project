@@ -1,0 +1,8 @@
+dependencies:
+  esp-idf-lib/esp_idf_lib_helpers:
+    version: '*'
+  esp-idf-lib/hd44780:
+    version: '*'
+  esp-idf-lib/pcf8574: {}
+description: i2c
+version: 1.0.0

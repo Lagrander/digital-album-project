@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "peripherals/aht20_sensor.c"
+        "peripherals/peripherals.c"
+        "peripherals/he30.c"
+        "peripherals/pcf8574_io.c"
+    INCLUDE_DIRS
+        "."
+        "peripherals"
+    REQUIRES
+        driver
+        freertos
+        espressif__aht20
+        heap
+        espressif__i2c_bus
+        pcf8574
+        i2cdev
+
+)

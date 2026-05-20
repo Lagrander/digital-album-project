@@ -1,0 +1,52 @@
+dependencies:
+  esp-idf-lib/esp_idf_lib_helpers:
+    dependencies: []
+    source:
+      path: components\esp-idf-lib__esp_idf_lib_helpers
+      type: local
+    version: 1.4.0
+  esp-idf-lib/i2cdev:
+    dependencies: []
+    source:
+      path: components\esp-idf-lib__i2cdev
+      type: local
+    version: 2.1.1
+  esp-idf-lib/pcf8574:
+    dependencies: []
+    source:
+      path: components\esp-idf-lib__pcf8574
+      type: local
+    version: 1.0.10
+  espressif/aht20:
+    dependencies: []
+    source:
+      path: components\espressif__aht20
+      type: local
+    version: 2.0.0
+  espressif/cmake_utilities:
+    dependencies: []
+    source:
+      path: components\espressif__cmake_utilities
+      type: local
+    version: 1.1.1
+  espressif/i2c_bus:
+    dependencies: []
+    source:
+      path: components\espressif__i2c_bus
+      type: local
+    version: 1.5.1
+  idf:
+    source:
+      type: idf
+    version: 6.0.1
+direct_dependencies:
+- esp-idf-lib/esp_idf_lib_helpers
+- esp-idf-lib/i2cdev
+- esp-idf-lib/pcf8574
+- espressif/aht20
+- espressif/cmake_utilities
+- espressif/i2c_bus
+- idf
+manifest_hash: 3dc4baf46525bd08fda784ea327db10363071bcf7b6befa1d31070f5b5a13891
+target: esp32s3
+version: 3.0.0
