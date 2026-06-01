@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+
+{% block title %}云端电子相册 - 库浏览{% endblock %}
+
+{% block content %}
+<!-- 多维度高级检索栏 -->
+<div class="filters-bar">
+    <form method="GET" action="/review" style="display:flex; flex-wrap:wrap; gap:16px; width:100%; align-items:center;">
+        <div class="filter-group" style="flex:1; min-width:200px;">
+            <input type="text" name="query" placeholder="🔍 搜索名称、旁白、地点或理由..." value="{{ query }}" style="width:100%;">
+        </div>
+        
+        <div class="filter-group">
+            <select name="filter_date">
+                <option value="">🗓️ 所有年月</option>
+                {% for d in date_options %}
+                <option value="{{ d }}" {% if d == filter_date %}selected{% endif %}>{{ d }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="filter-group">
+            <select name="tag">
+                <option value="">🏷️ 所有标签</option>
+                {% for t in tag_options %}
+                <option value="{{ t }}" {% if t == tag %}selected{% endif %}>{{ t }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div class="filter-group">
+            <select name="sort">
+                <option value="memory" {% if sort == 'memory' %}selected{% endif %}>🔥 回忆度最高</option>
+                <option value="beauty" {% if sort == 'beauty' %}selected{% endif %}>✨ 美观度最高</option>
+                <option value="time_new" {% if sort == 'time_new' %}selected{% endif %}>🕒 最新拍摄</option>
+                <option value="time_old" {% if sort == 'time_old' %}selected{% endif %}>⏳ 最早拍摄</option>
+            </select>
+        </div>
+        
+        <button type="submit" class="btn btn-primary">筛选应用</button>
+        <a href="/review" class="btn btn-outline" style="padding:10px;">重置</a>
+    </form>
+</div>
+
+<!-- 照片网格 -->
+<div class="gallery">
+    {% for p in photos %}
+    <div class="photo-card" 
+         data-path="{{ p.path }}"
+         data-caption="{{ p.caption }}"
+         data-reason="{{ p.reason }}"
+         data-type="{{ p.type }}"
+         data-memory="{{ p.memory_score }}"
+         data-beauty="{{ p.beauty_score }}"
+         data-datetime="{{ p.exif_datetime or p.date_str }}"
+         data-make="{{ p.exif_make }}"
+         data-model="{{ p.exif_model }}"
+         data-city="{{ p.exif_city }}"
+         data-lat="{{ p.exif_gps_lat }}"
+         data-lon="{{ p.exif_gps_lon }}"
+         data-tags="{{ p.tags }}"
+         data-img-uri="{{ p.img_uri }}">
+         
+        <!-- 删除/隐藏按钮 -->
+        <button class="delete-btn" data-path="{{ p.path }}" title="隐藏/删除此照片">🗑️</button>
+        
+        <div class="img-wrap">
+            <img src="{{ p.img_uri }}" loading="lazy" alt="photo">
+        </div>
+        
+        <div class="meta">
+            <!-- 旁白，支持悬停快捷编辑 -->
+            <div class="side-caption">
+                <span>{{ p.side_caption or '无题' }}</span>
+                <i class="edit-icon" data-path="{{ p.path }}" title="修改旁白">✏️</i>
+            </div>
+            
+            <div class="scores">
+                <span>回忆度: <strong style="color:var(--accent)">{{ "%.1f"|format(p.memory_score|float) if p.memory_score else '-' }}</strong></span>
+                <span>美观度: <strong style="color:var(--success)">{{ "%.1f"|format(p.beauty_score|float) if p.beauty_score else '-' }}</strong></span>
+            </div>
+            
+            {% if p.tags %}
+            <div class="tags-list">
+                {% for t in p.tags.split(',') %}
+                    {% if t.strip() %}
+                    <span class="tag-badge">{{ t.strip() }}</span>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div style="grid-column: 1 / -1; text-align: center; padding: 60px; color: var(--muted);">
+        <h2 style="margin-bottom: 8px;">相册空空如也</h2>
+        <p>没有找到符合条件的照片，或者等待系统扫描。</p>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- 分页控件 -->
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="?page={{ page - 1 }}&md={{ md }}&filter_date={{ filter_date }}&tag={{ tag }}&query={{ query }}&sort={{ sort }}" class="page-item">&laquo; 上一页</a>
+    {% endif %}
+    
+    {% for p_num in range(1, total_pages + 1) %}
+        {% if p_num == 1 or p_num == total_pages or (p_num >= page - 2 and p_num <= page + 2) %}
+            <a href="?page={{ p_num }}&md={{ md }}&filter_date={{ filter_date }}&tag={{ tag }}&query={{ query }}&sort={{ sort }}" class="page-item {% if p_num == page %}active{% endif %}">{{ p_num }}</a>
+        {% elif p_num == page - 3 or p_num == page + 3 %}
+            <span style="align-self: center; color: var(--muted);">...</span>
+        {% endif %}
+    {% endfor %}
+    
+    {% if page < total_pages %}
+    <a href="?page={{ page + 1 }}&md={{ md }}&filter_date={{ filter_date }}&tag={{ tag }}&query={{ query }}&sort={{ sort }}" class="page-item">下一页 &raquo;</a>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- 全屏图片详情毛玻璃模态框 (Modal) -->
+<div class="modal-overlay" id="photo-modal">
+    <div class="modal-content">
+        <button class="modal-close" title="关闭详情">&times;</button>
+        <div class="modal-img-area">
+            <img id="m-img" src="" alt="Full Resolution">
+        </div>
+        <div class="modal-info-area">
+            <div class="info-block">
+                <h3>📖 AI 长描述与场景</h3>
+                <p style="color:var(--accent); font-weight:600; margin-bottom:8px;">[ <span id="m-type"></span> ]</p>
+                <p id="m-caption"></p>
+            </div>
+            <div class="info-block">
+                <h3>🧠 评分洞察理由</h3>
+                <p id="m-reason" style="font-size:0.95rem;"></p>
+            </div>
+            <div class="info-block">
+                <h3>📷 EXIF 追踪数据</h3>
+                <div class="exif-grid" id="m-exif">
+                    <!-- JS 动态注入 -->
+                </div>
+            </div>
+            <div class="info-block">
+                <h3>🏷️ 自定义相册标签</h3>
+                <div class="tags-list" id="m-tags" style="gap:8px;">
+                    <!-- JS 动态注入 -->
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

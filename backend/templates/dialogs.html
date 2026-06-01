@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}云端电子相册 - 交互审计与智能对话{% endblock %}
+
+{% block content %}
+<div style="margin-bottom:24px;">
+    <h2>🤖 智能相册助手</h2>
+    <p style="color:var(--muted); font-size:0.95rem;">在这里，您可以通过文字与相册的智能情感核心对话，您的情绪将直接联动远端的香薰与画面播放，所有的改变将在此铭刻成史。</p>
+</div>
+
+<div class="dialog-layout">
+    <!-- 左侧：AI 气泡对话框 -->
+    <div class="chat-window">
+        <div class="chat-messages" id="chat-messages">
+            <div class="msg-bubble msg-ai">
+                欢迎您。我是云端相册助手。告诉我今天的心情，我将为您挑选最契合的照片，并搭配适宜的香薰。
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <input type="text" id="chat-input" class="form-control" style="margin-bottom:0;" placeholder="例如：今天很累，想放松一下..." autocomplete="off">
+            <button id="btn-send" class="btn btn-primary" style="white-space:nowrap;">发送</button>
+        </div>
+    </div>
+
+    <!-- 右侧：交互与行为垂直时间轴 (Timeline) -->
+    <div class="card timeline-window" id="timeline-window">
+        <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid hsl(var(--h-border), var(--s-border), var(--l-border)); padding-bottom:8px; margin-bottom:24px;">
+            <h3 style="margin:0; font-size:1rem; color:var(--muted);">
+                📜 历史交互记录
+            </h3>
+            <button class="btn btn-outline" id="clear-dialogs-btn" style="padding: 4px 12px; font-size: 0.85rem; color: var(--danger); border-color: var(--danger);">🗑️ 清空记录</button>
+        </div>
+        
+        <div class="timeline" id="timeline-container">
+            <!-- 由 JS 动态渲染 -->
+            <div style="color:var(--muted); font-size:0.9rem;">正在加载历史档案...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // 渲染时间轴
+    document.addEventListener('DOMContentLoaded', async () => {
+        const tlContainer = document.getElementById('timeline-container');
+        try {
+            const res = await fetch('/api/dialogs/history');
+            const data = await res.json();
+            
+            if(data.history && data.history.length > 0) {
+                // 绑定清空记录事件
+                document.getElementById('clear-dialogs-btn')?.addEventListener('click', async () => {
+                    if(!confirm('确定要清空所有的历史交互记录吗？此操作不可恢复。')) return;
+                    await fetch('/api/dialogs/clear', { method: 'POST' });
+                    document.location.reload();
+                });
+                
+                // 将历史记录倒序展示（最新在上）
+                const reversed = data.history.slice().reverse();
+                
+                tlContainer.innerHTML = reversed.map(h => {
+                    const isAi = h.sender === 'ai';
+                    return `
+                    <div class="tl-item">
+                        <div class="tl-time">${h.created_at} &middot; <span style="font-weight:600; color:${isAi ? 'var(--accent)' : 'inherit'}">${isAi ? '智能相册助手' : '用户 (您)'}</span></div>
+                        <div class="tl-content">
+                            <div style="font-style:${!isAi ? 'italic' : 'normal'}">${h.content}</div>
+                            ${h.aroma_change ? `<div class="tl-action">💠 ${h.aroma_change}</div>` : ''}
+                        </div>
+                    </div>`;
+                }).join('');
+            } else {
+                tlContainer.innerHTML = '<div style="color:var(--muted); font-size:0.9rem;">暂无交互记录，试着在左侧说点什么吧。</div>';
+            }
+        } catch(e) {
+            tlContainer.innerHTML = '<div style="color:var(--danger); font-size:0.9rem;">加载交互记录失败。</div>';
+        }
+    });
+</script>
+{% endblock %}

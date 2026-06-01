@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}云端电子相册{% endblock %}</title>
+    <!-- 使用现代无衬线字体 Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <!-- 玻璃拟态全局导航栏 -->
+    <nav class="navbar">
+        <div class="nav-brand">✨ 极客电子相册</div>
+        <div class="nav-links">
+            <a href="/review" class="nav-link {% if request.path == '/review' %}active{% endif %}">照片库</a>
+            <a href="/upload" class="nav-link {% if request.path == '/upload' %}active{% endif %}">图片上传</a>
+            <a href="/device" class="nav-link {% if request.path == '/device' %}active{% endif %}">物理设备台</a>
+            <a href="/dialogs" class="nav-link {% if request.path == '/dialogs' %}active{% endif %}">智能助手</a>
+        </div>
+        <div class="nav-actions">
+            <button id="theme-toggle" class="theme-toggle" title="切换暗黑/明亮模式">☀️</button>
+        </div>
+    </nav>
+
+    <!-- 主体内容区 -->
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

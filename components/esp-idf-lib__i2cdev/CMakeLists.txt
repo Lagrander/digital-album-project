@@ -5,9 +5,14 @@ eil_check_idf_has_esp_drivers()
 # List of common ESP-IDF components required by this component
 set(REQUIRED_COMPONENTS log freertos esp_idf_lib_helpers)
 
-# Add version-specific required componenets
+# Add version-specific required components
 if(EIL_IDF_HAS_ESP_DRIVERS)
-    list(APPEND REQUIRED_COMPONENTS esp_driver_gpio esp_driver_i2c)
+    list(APPEND REQUIRED_COMPONENTS esp_driver_gpio)
+    if(CONFIG_I2CDEV_USE_LEGACY_DRIVER)
+        list(APPEND REQUIRED_COMPONENTS driver)
+    else()
+        list(APPEND REQUIRED_COMPONENTS esp_driver_i2c)
+    endif()
 else()
     list(APPEND REQUIRED_COMPONENTS driver)
 endif()
@@ -42,8 +47,10 @@ else()
 endif()
 
 # Register the component
+# Added PRIV_REQUIRES driver to fix the missing header error
 idf_component_register(SRCS ${SRCS}
                        INCLUDE_DIRS "."
-                       REQUIRES ${REQUIRED_COMPONENTS})
+                       REQUIRES ${REQUIRED_COMPONENTS}
+                       PRIV_REQUIRES driver)
 
 include(eil_ci)

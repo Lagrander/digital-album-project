@@ -1,3 +1,23 @@
+menu "Network Configuration"
+
+    config WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default ""
+
+    config SERVER_URL
+        string "Photo Server URL"
+        default "http://192.168.1.100:8765"
+
+    config DOWNLOAD_KEY
+        string "Download Key"
+        default ""
+
+endmenu
+
 menu "AHT20 I2C Configuration"
 
     config I2C_MASTER_SDA
@@ -13,5 +33,169 @@ menu "AHT20 I2C Configuration"
         range 0 48
         help
             GPIO used for the AHT20 I2C SCL line.
+
+endmenu
+
+menu "Example Configuration"
+
+    menu "Display"
+        config EXAMPLE_LCD_RGB_BOUNCE_BUFFER_HEIGHT
+            int "RGB Bounce buffer height"
+            default 10
+            help
+                Height of bounce buffer. The width of the buffer is the same as that of the LCD.
+
+        config EXAMPLE_LVGL_PORT_TASK_MAX_DELAY_MS
+            int "LVGL timer task maximum delay (ms)"
+            default 500
+            range 2 2000
+            help
+                The maximum delay of the LVGL timer task, in milliseconds.
+
+        config EXAMPLE_LVGL_PORT_TASK_MIN_DELAY_MS
+            int "LVGL timer task minimum delay (ms)"
+            default 10
+            range 1 100
+            help
+                The minimum delay of the LVGL timer task, in milliseconds.
+
+        config EXAMPLE_LVGL_PORT_TASK_PRIORITY
+            int "LVGL task priority"
+            default 2
+            help
+                The Board Support Package will create a task that will periodically handle LVGL operation in lv_timer_handler().
+
+        config EXAMPLE_LVGL_PORT_TASK_STACK_SIZE_KB
+            int "LVGL task stack size (KB)"
+            default 6
+            help
+                Size(KB) of LVGL task stack.
+
+        config EXAMPLE_LVGL_PORT_TASK_CORE
+            int "LVGL timer task core"
+            default -1
+            range -1 1
+            help
+                The core of the LVGL timer task.
+                Set to -1 to not specify the core.
+                Set to 1 only if the SoCs support dual-core, otherwise set to -1 or 0.
+
+        config EXAMPLE_LVGL_PORT_TICK
+            int "LVGL tick period"
+            default 2
+            range 1 100
+            help
+                Period of LVGL tick timer.
+
+        config EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE
+            bool "Avoid tearing effect"
+            default n
+            help
+                Avoid tearing effect through LVGL buffer mode and double frame buffers of RGB LCD. This feature is only available for RGB LCD.
+
+        choice
+            depends on EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE
+            prompt "Select Avoid Tearing Mode"
+            default EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_3
+            config EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_1
+                bool "Mode1: LCD double-buffer & LVGL full-refresh"
+            config EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_2
+                bool "Mode2: LCD triple-buffer & LVGL full-refresh"
+            config EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_3
+                bool "Mode3: LCD double-buffer & LVGL direct-mode"
+            help
+                The current tearing prevention mode supports both full refresh mode and direct mode. Tearing prevention mode may consume more PSRAM space
+        endchoice
+
+        config EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE
+            depends on EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE
+            int
+            default 1 if EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_1
+            default 2 if EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_2
+            default 3 if EXAMPLE_LVGL_PORT_AVOID_TEAR_MODE_3
+
+        choice
+            depends on EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE
+            prompt "Select rotation"
+            default EXAMPLE_LVGL_PORT_ROTATION_0
+            config EXAMPLE_LVGL_PORT_ROTATION_0
+                bool "Rotation 0"
+            config EXAMPLE_LVGL_PORT_ROTATION_90
+                bool "Rotation 90"
+            config EXAMPLE_LVGL_PORT_ROTATION_180
+                bool "Rotation 180"
+            config EXAMPLE_LVGL_PORT_ROTATION_270
+                bool "Rotation 270"
+        endchoice
+
+        config EXAMPLE_LVGL_PORT_ROTATION_DEGREE
+            int
+            default 0 if EXAMPLE_LVGL_PORT_ROTATION_0
+            default 90 if EXAMPLE_LVGL_PORT_ROTATION_90
+            default 180 if EXAMPLE_LVGL_PORT_ROTATION_180
+            default 270 if EXAMPLE_LVGL_PORT_ROTATION_270
+
+        choice
+            depends on !EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE
+            prompt "Select LVGL buffer memory capability"
+            default EXAMPLE_LVGL_PORT_BUF_INTERNAL
+            config EXAMPLE_LVGL_PORT_BUF_PSRAM
+                bool "PSRAM memory"
+            config EXAMPLE_LVGL_PORT_BUF_INTERNAL
+                bool "Internal memory"
+        endchoice
+
+        config EXAMPLE_LVGL_PORT_BUF_HEIGHT
+            depends on !EXAMPLE_LVGL_PORT_AVOID_TEAR_ENABLE
+            int "LVGL buffer height"
+            default 100
+            help
+                Height of LVGL buffer. The width of the buffer is the same as that of the LCD.
+    endmenu
+endmenu
+
+menu "Voice Assistant"
+
+    config VA_WS_URI
+        string "LLM WebSocket Server URL"
+        default "ws://192.168.1.100:8888"
+        help
+            WebSocket URI of the voice server (voice_server.py).
+
+    menu "I2S Microphone (INMP441)"
+        config VA_MIC_WS_PIN
+            int "MIC WS (LRCLK) GPIO"
+            default 6
+            range 0 48
+        config VA_MIC_SCK_PIN
+            int "MIC SCK (BCLK) GPIO"
+            default 15
+            range 0 48
+        config VA_MIC_SD_PIN
+            int "MIC SD (DATA) GPIO"
+            default 16
+            range 0 48
+    endmenu
+
+    menu "I2S Speaker (MAX98357A)"
+        config VA_SPK_BCLK_PIN
+            int "SPK BCLK GPIO"
+            default 11
+            range 0 48
+        config VA_SPK_LRCK_PIN
+            int "SPK LRCLK GPIO"
+            default 12
+            range 0 48
+        config VA_SPK_DIN_PIN
+            int "SPK DIN GPIO"
+            default 13
+            range 0 48
+        config VA_SPK_SD_PIN
+            int "SPK SD (Shutdown) GPIO"
+            default 19
+            range 0 48
+            help
+                MAX98357A SD_MODE pin. High = active, Low/GND = shutdown.
+    endmenu
 
 endmenu

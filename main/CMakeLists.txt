@@ -1,20 +1,59 @@
 idf_component_register(
     SRCS
         "main.c"
-        "peripherals/aht20_sensor.c"
-        "peripherals/peripherals.c"
-        "peripherals/he30.c"
-        "peripherals/pcf8574_io.c"
+        "./peripherals/src/mpu6050_sensor.c"
+        "./peripherals/src/aht20_sensor.c"
+        "./peripherals/src/peripherals_task.c"
+        "./peripherals/src/he30.c"
+        "./peripherals/src/pcf8574_io.c"
+        "./peripherals/src/audio_player.c"
+        "./peripherals/src/aroma_ctrl.c"
+        "./peripherals/src/i2s_output.c"
+        "./peripherals/src/i2s_mic_input.c"
+        "./lv_ui/src/lvgl_ui_task.c"
+        "./lv_ui/src/waveshare_rgb_lcd_port.c"
+        "./lv_ui/src/lvgl_port.c"
+        "./lv_ui/src/ui_main.c"
+        "./lv_ui/src/ui_icons.c"
+        "./lv_ui/src/ui_png_images.c"
+        "./lv_ui/src/lv_font_cjk_16.c"
+        "./lv_ui/src/lv_font_cjk_20.c"
+        "./lv_ui/src/lv_voice_assistant.c"
+        "./net_mgr/net_mgr.c"
+        "./photo_client/photo_client.c"
+        "./voice_assistant/src/voice_io.c"
+        "./voice_assistant/src/audio_buf.c"
+        "./voice_assistant/src/ws_voice.c"
+        "./voice_assistant/src/voice_assistant.c"
+        "./voice_assistant/src/voice_assistant_task.c"
     INCLUDE_DIRS
         "."
-        "peripherals"
+        "./peripherals/include"
+        "./lv_ui/include"
+        "./net_mgr"
+        "./photo_client"
+        "./voice_assistant/include"
     REQUIRES
         driver
+        esp_driver_i2s
+        esp_lcd
         freertos
         espressif__aht20
         heap
         espressif__i2c_bus
-        pcf8574
-        i2cdev
-
+        esp-idf-lib__pcf8574
+        esp-idf-lib__i2cdev
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_client
+        cJSON
+        esp-sr
+        esp_websocket_client
+        spiffs
 )
+
+# ---- 嵌入占位图片 ----
+target_add_binary_data(${COMPONENT_LIB} "data/placeholder.rgb565" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "data/placeholder_landscape.rgb565" BINARY)

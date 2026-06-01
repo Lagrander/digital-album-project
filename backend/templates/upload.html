@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+
+{% block title %}云端电子相册 - 惊喜传送{% endblock %}
+
+{% block content %}
+<div class="upload-layout">
+    <!-- 左侧：传送配置表单 -->
+    <div class="card">
+        <h2 style="margin-bottom: 8px;">✨ 投递今日份的照片</h2>
+        <p style="color:var(--muted); font-size:0.9rem; margin-bottom: 24px;">
+            选一张照片发送到远方的电子相册吧~
+        </p>
+
+        <form action="/upload/send" method="POST" enctype="multipart/form-data" id="upload-form">
+            <!-- 拖拽上传区 -->
+            <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+                <div style="font-size:3rem; margin-bottom:12px;">📸</div>
+                <div style="font-weight:600; color:var(--text);">点击选择照片，或拖拽到此处</div>
+                <div style="font-size:0.8rem; color:var(--muted); margin-top:4px;">支持 JPG / PNG / HEIC</div>
+            </div>
+            <input type="file" name="photo" id="file-input" accept="image/*" style="display:none;" required>
+
+            <label style="font-size:0.85rem; font-weight:600; margin-bottom:6px; display:block;">📝 悄悄话 (将显示在屏幕底部)</label>
+            <input type="text" name="message" id="message" class="form-control" maxlength="50" placeholder="例如：属于今天的特别回忆..." required>
+
+            <div style="display:flex; gap:16px;">
+                <div style="flex:1;">
+                    <label style="font-size:0.85rem; font-weight:600; margin-bottom:6px; display:block;">👤 你的署名</label>
+                    <input type="text" name="name" id="name" class="form-control" maxlength="20" placeholder="保密">
+                </div>
+                <div style="flex:1;">
+                    <label style="font-size:0.85rem; font-weight:600; margin-bottom:6px; display:block;">📅 目标日期</label>
+                    <input type="date" name="target_date" id="target-date" class="form-control">
+                </div>
+            </div>
+
+            {% if password_required %}
+            <label style="font-size:0.85rem; font-weight:600; margin-bottom:6px; display:block;">🔒 传送密钥</label>
+            <input type="password" name="password" class="form-control" required>
+            {% endif %}
+
+            <button type="submit" class="btn btn-primary" style="width:100%; padding:14px; font-size:1.05rem; margin-top:8px;">🚀 发送</button>
+        </form>
+    </div>
+
+    <!-- 右侧：3D ESP32 真机渲染预览模拟器 -->
+    <div class="device-preview-wrapper">
+        <div class="esp-device">
+            <div class="esp-screen">
+                <!-- 高斯模糊背景与前景图片 -->
+                <img id="sim-bg" class="bg-blur" src="https://via.placeholder.com/480x800/1a1a1a/1a1a1a" alt="">
+                <img id="sim-fg" class="fg-img" src="" alt="">
+                
+                <!-- 模拟顶栏 -->
+                <div class="esp-topbar">
+                    <span>23°C &nbsp;45%</span>
+                    <span id="sim-time">--:--</span>
+                </div>
+                
+                <!-- 模拟底栏 -->
+                <div class="esp-bottombar">
+                    <div id="sim-caption" class="esp-caption">等待输入照片旁白...</div>
+                    <div class="esp-date">2026-05-27  |  🏠 辽宁沈阳</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<hr style="border:none; border-top:1px solid hsl(var(--h-border), var(--s-border), var(--l-border)); margin: 40px 0;">
+
+<!-- 历史记录与排队队列 -->
+<div>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <h2 style="margin: 0;">📜 投递日志与上传队列</h2>
+        <button class="btn btn-outline" id="clear-upload-btn" style="padding: 4px 12px; font-size: 0.85rem; color: var(--danger); border-color: var(--danger);">🗑️ 清空日志</button>
+    </div>
+    <p style="color:var(--muted); font-size:0.9rem;">查看已发送至相册的历史记录，蓝色代表排队中（可撤回），绿色代表设备已下载。</p>
+    
+    <div class="history-grid" id="history-grid">
+        <!-- 通过 JS 动态加载 -->
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // 将历史列表拉取和渲染重构为全局方法，支持 SPA 无刷新渐入局部重载
+    window.loadUploadHistory = async function() {
+        try {
+            const r = await fetch('/api/upload/history');
+            const data = await r.json();
+            const grid = document.getElementById('history-grid');
+            if(!grid) return;
+            
+            if(data.history && data.history.length > 0) {
+                grid.innerHTML = data.history.map(h => `
+                    <div class="history-card" style="opacity: 0; transform: translateY(10px); transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);">
+                        <img src="${h.preview_path}" loading="lazy" alt="Preview">
+                        <div class="info">
+                            <div style="font-weight:600; margin-bottom:4px;">
+                                <span class="status-dot ${h.downloaded ? 'done' : 'pending'}"></span>
+                                ${h.downloaded ? '已接收显示' : '云端排队等待'}
+                            </div>
+                            <div style="color:var(--muted); font-size:0.8rem; margin-bottom:8px;">${h.target_date} / By ${h.uploader_name}</div>
+                            <div style="line-height:1.4; font-style:italic;">"${h.message || '无留言'}"</div>
+                            ${!h.downloaded ? `<button class="btn btn-outline del-upload-btn" data-id="${h.id}" style="width:100%; padding:6px; margin-top:12px; font-size:0.8rem;">撤回投递</button>` : ''}
+                        </div>
+                    </div>
+                `).join('');
+                
+                // 触发优雅的交错淡入动效
+                setTimeout(() => {
+                    grid.querySelectorAll('.history-card').forEach((card, idx) => {
+                        setTimeout(() => {
+                            card.style.opacity = '1';
+                            card.style.transform = 'translateY(0)';
+                        }, idx * 60);
+                    });
+                }, 50);
+                
+                // 重新局部绑定撤回事件，不再进行重载
+                grid.querySelectorAll('.del-upload-btn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        if (!confirm('确定要撤回这个排队中的惊喜吗？')) return;
+                        const res = await fetch('/api/upload/delete', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ id: btn.dataset.id })
+                        });
+                        const resData = await res.json();
+                        if(resData.ok) {
+                            window.loadUploadHistory();
+                        } else {
+                            alert('撤回失败，请稍后重试');
+                        }
+                    });
+                });
+            } else {
+                grid.innerHTML = '<div style="color:var(--muted); opacity: 0; transition: opacity 0.4s ease;" id="empty-history-tip">暂无传送日志。</div>';
+                setTimeout(() => {
+                    const tip = document.getElementById('empty-history-tip');
+                    if(tip) tip.style.opacity = '1';
+                }, 50);
+            }
+        } catch(e) {
+            console.error('获取历史记录失败:', e);
+        }
+    };
+
+    // 页面加载时设置默认日期并加载历史队列
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('target-date').value = new Date().toISOString().split('T')[0];
+        
+        // 首次加载历史
+        window.loadUploadHistory();
+        
+        // 绑定清空日志事件 (Ajax 模式)
+        document.getElementById('clear-upload-btn')?.addEventListener('click', async () => {
+            if(!confirm('确定要清空所有的投递日志吗？此操作不可恢复。')) return;
+            const res = await fetch('/api/upload/clear', { method: 'POST' });
+            const resData = await res.json();
+            if(resData.ok) {
+                window.loadUploadHistory();
+            } else {
+                alert('清空失败，请稍后重试');
+            }
+        });
+    });
+</script>
+{% endblock %}

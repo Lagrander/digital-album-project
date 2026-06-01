@@ -23,12 +23,80 @@ dependencies:
       path: components\espressif__aht20
       type: local
     version: 2.0.0
+  espressif/cjson:
+    component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.7.19~2
   espressif/cmake_utilities:
     dependencies: []
     source:
       path: components\espressif__cmake_utilities
       type: local
     version: 1.1.1
+  espressif/dl_fft:
+    component_hash: ced3cf28cc70452b7859c06f4e5059215167254a2047e34c893d6f501ccd6ea2
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.4.0
+  espressif/esp-dsp:
+    component_hash: 12e44db246517a627bc0fe2b255b8335410c0215c98bfba2df5a8e3edea839ef
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.8.0
+  espressif/esp-sr:
+    component_hash: 70f252161c06dbf4e901025f83f119cbe53b6d94f19dd8018f5cd0d23df68ffa
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    - name: espressif/esp-dsp
+      registry_url: https://components.espressif.com
+      require: private
+      version: 1.8.0
+    - name: espressif/cjson
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.7.19
+    - name: espressif/dl_fft
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.2.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.4.5
+  espressif/esp_lvgl_port:
+    dependencies: []
+    source:
+      path: components\espressif__esp_lvgl_port
+      type: local
+    version: 2.8.0~1
+  espressif/esp_websocket_client:
+    component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.7.0
   espressif/i2c_bus:
     dependencies: []
     source:
@@ -39,14 +107,24 @@ dependencies:
     source:
       type: idf
     version: 6.0.1
+  lvgl/lvgl:
+    dependencies: []
+    source:
+      path: components\lvgl__lvgl
+      type: local
+    version: 8.4.0
 direct_dependencies:
 - esp-idf-lib/esp_idf_lib_helpers
 - esp-idf-lib/i2cdev
 - esp-idf-lib/pcf8574
 - espressif/aht20
 - espressif/cmake_utilities
+- espressif/esp-sr
+- espressif/esp_lvgl_port
+- espressif/esp_websocket_client
 - espressif/i2c_bus
 - idf
-manifest_hash: 3dc4baf46525bd08fda784ea327db10363071bcf7b6befa1d31070f5b5a13891
+- lvgl/lvgl
+manifest_hash: c6a4257e40bac6aa9808b25e85f101a0e59ca49b02de2654528b13a6b06885eb
 target: esp32s3
 version: 3.0.0
