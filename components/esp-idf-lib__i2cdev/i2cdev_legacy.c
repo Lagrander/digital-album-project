@@ -533,12 +533,13 @@ static esp_err_t i2c_setup_port(i2c_dev_t *dev)
         err = ESP_ERR_NOT_SUPPORTED; // Indicate that setup can't proceed.
 #endif
 
-        if (err != ESP_OK)
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE && err != ESP_FAIL)
         {
             ESP_LOGE(TAG, "Failed to install/configure I2C driver for port %d: %d (%s)", dev->port, err, esp_err_to_name(err));
             states[dev->port].installed = false; // Ensure state reflects failure
             return err;
         }
+        err = ESP_OK;
 
         memcpy(&states[dev->port].config, &legacy_cfg, sizeof(i2c_config_t));
         states[dev->port].installed = true;

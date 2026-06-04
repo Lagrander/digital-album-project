@@ -543,7 +543,9 @@ static esp_err_t i2c_driver_reinit(i2c_port_t port, const i2c_config_t *conf)
         ret = i2c_param_config(port, conf);
         I2C_BUS_CHECK(ret == ESP_OK, "i2c param config failed", ret);
         ret = i2c_driver_install(port, conf->mode, I2C_BUS_MASTER_BUF_LEN, I2C_BUS_MASTER_BUF_LEN, I2C_BUS_FLG_DEFAULT);
-        I2C_BUS_CHECK(ret == ESP_OK, "i2c driver install failed", ret);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            I2C_BUS_CHECK(false, "i2c driver install failed", ret);
+        }
     }
     s_i2c_bus[port].is_init = true;
     ESP_LOGI(TAG, "i2c%d bus inited", port);

@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "./peripherals/src/mpu6050_sensor.c"
         "./peripherals/src/aht20_sensor.c"
+        "./peripherals/src/tca9548a.c"
         "./peripherals/src/peripherals_task.c"
         "./peripherals/src/he30.c"
         "./peripherals/src/pcf8574_io.c"
@@ -26,6 +27,7 @@ idf_component_register(
         "./voice_assistant/src/ws_voice.c"
         "./voice_assistant/src/voice_assistant.c"
         "./voice_assistant/src/voice_assistant_task.c"
+        "./app/app_event.c"
     INCLUDE_DIRS
         "."
         "./peripherals/include"
@@ -33,6 +35,7 @@ idf_component_register(
         "./net_mgr"
         "./photo_client"
         "./voice_assistant/include"
+        "./app"
     REQUIRES
         driver
         esp_driver_i2s

@@ -30,27 +30,27 @@ extern "C" {
  * - SD  (DATA) : 串行数据输出
  */
 #ifndef CONFIG_VA_MIC_WS_PIN
-#define CONFIG_VA_MIC_WS_PIN   6
+#define CONFIG_VA_MIC_WS_PIN   4
 #endif
 #ifndef CONFIG_VA_MIC_SCK_PIN
-#define CONFIG_VA_MIC_SCK_PIN  15
+#define CONFIG_VA_MIC_SCK_PIN  12
 #endif
 #ifndef CONFIG_VA_MIC_SD_PIN
-#define CONFIG_VA_MIC_SD_PIN   16
+#define CONFIG_VA_MIC_SD_PIN   13
 #endif
 
 /* ── 扬声器 I2S 引脚 ────────────────────────────────────────── */
 #ifndef CONFIG_VA_SPK_BCLK_PIN
-#define CONFIG_VA_SPK_BCLK_PIN 11
+#define CONFIG_VA_SPK_BCLK_PIN 12
 #endif
 #ifndef CONFIG_VA_SPK_LRCK_PIN
-#define CONFIG_VA_SPK_LRCK_PIN 12
+#define CONFIG_VA_SPK_LRCK_PIN 4
 #endif
 #ifndef CONFIG_VA_SPK_DIN_PIN
-#define CONFIG_VA_SPK_DIN_PIN  13
+#define CONFIG_VA_SPK_DIN_PIN  11
 #endif
 #ifndef CONFIG_VA_SPK_SD_PIN
-#define CONFIG_VA_SPK_SD_PIN   19   /* MAX98357A SD_MODE: 高电平=工作, 低电平=关断 */
+#define CONFIG_VA_SPK_SD_PIN   -1   /* -1 表示无 GPIO 控制，硬件接地常开 */
 #endif
 
 /* ── 麦克风 API ─────────────────────────────────────────────── */

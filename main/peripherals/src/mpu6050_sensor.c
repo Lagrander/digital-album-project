@@ -1,6 +1,7 @@
 #include "mpu6050_sensor.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "tca9548a.h"
 #include "ui_main.h" // 引用 UI 方向设置接口
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,22 +22,16 @@ esp_err_t mpu6050_init(void) {
   if (mpu6050_initialized)
     return ESP_OK;
 
-  // 安全初始化 I2C 总线，避免与其他驱动（如 LCD 背光）冲突
-  i2c_config_t conf = {
-      .mode = I2C_MODE_MASTER,
-      .sda_io_num = MPU6050_I2C_SDA_IO,
-      .scl_io_num = MPU6050_I2C_SCL_IO,
-      .sda_pullup_en = GPIO_PULLUP_ENABLE,
-      .scl_pullup_en = GPIO_PULLUP_ENABLE,
-      .master.clk_speed = 400000,
-  };
-  esp_err_t err = i2c_param_config(MPU6050_I2C_NUM, &conf);
-  if (err == ESP_OK) {
-    err = i2c_driver_install(MPU6050_I2C_NUM, conf.mode, 0, 0, 0);
-    if (err != ESP_OK && err != ESP_FAIL && err != ESP_ERR_INVALID_STATE) {
-      ESP_LOGE(TAG, "I2C driver install failed: %s", esp_err_to_name(err));
-      return err;
-    }
+  // I2C 已经在 main 或 lcd 初始化时配置过，此处不需要重复调用 i2c_param_config 和 i2c_driver_install
+  // 否则会重置 I2C 硬件状态机，导致整个 I2C 总线超时死锁。
+
+  i2c_bus_lock();
+  esp_err_t err = tca9548a_select_channel(1);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Init: Failed to select channel 1: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "通道1，选择失败！");
+    i2c_bus_unlock();
+    return err;
   }
 
   // 唤醒 MPU6050 (向 PWR_MGMT_1 写入 0x00)
@@ -48,6 +43,9 @@ esp_err_t mpu6050_init(void) {
   i2c_master_stop(cmd);
   err = i2c_master_cmd_begin(MPU6050_I2C_NUM, cmd, pdMS_TO_TICKS(100));
   i2c_cmd_link_delete(cmd);
+
+  tca9548a_disable_all_channels();
+  i2c_bus_unlock();
 
   if (err == ESP_OK) {
     ESP_LOGI(TAG, "MPU6050 initialized successfully.");
@@ -90,6 +88,15 @@ void peripheral_mpu6050(void) {
   static bool current_is_portrait = true; // 假设初始为竖屏
 
   int16_t accel_x = 0, accel_y = 0, accel_z = 0;
+
+  esp_err_t ret = ESP_FAIL;
+  i2c_bus_lock();
+  ret = tca9548a_select_channel(1);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to select channel: %s", esp_err_to_name(ret));
+    goto cleanup;
+  }
+
   if (mpu6050_read_accel(&accel_x, &accel_y, &accel_z) == ESP_OK) {
     bool is_portrait = abs(accel_y) > abs(accel_x);
 
@@ -111,5 +118,11 @@ void peripheral_mpu6050(void) {
       ESP_LOGI(TAG, "Orientation changed to Landscape.");
       ui_set_screen_rotation(false);
     }
+  } else {
+    ESP_LOGE(TAG, "Failed to read: %s", esp_err_to_name(ret));
   }
+
+cleanup:
+  tca9548a_disable_all_channels(); // 读完后关闭总线
+  i2c_bus_unlock();
 }

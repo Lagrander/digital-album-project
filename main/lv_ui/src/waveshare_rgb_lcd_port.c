@@ -5,6 +5,7 @@
  */
 
 #include "waveshare_rgb_lcd_port.h"
+#include "i2c_bus.h"
 
 static const char *TAG = "waveshare_rgb_lcd";
 static bool i2c_driver_ready = false;
@@ -21,15 +22,10 @@ static void ensure_i2c_ready(void) {
       .scl_pullup_en = GPIO_PULLUP_ENABLE,
       .master.clk_speed = I2C_MASTER_FREQ_HZ,
   };
-  esp_err_t ret = i2c_param_config(I2C_MASTER_NUM, &i2c_conf);
-  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    ESP_ERROR_CHECK(ret);
-  }
-  ret = i2c_driver_install(I2C_MASTER_NUM, I2C_MODE_MASTER, 0, 0, 0);
-  if (ret == ESP_ERR_INVALID_STATE) {
-    ESP_LOGI(TAG, "I2C driver already installed, reusing");
-  } else {
-    ESP_ERROR_CHECK(ret);
+  i2c_bus_handle_t bus = i2c_bus_create(I2C_MASTER_NUM, &i2c_conf);
+  if (bus == NULL) {
+    ESP_LOGE(TAG, "Failed to create I2C bus via i2c_bus_create");
+    return;
   }
 
   /* 上电极早期安装驱动后，给总线电容和外接上拉电阻 5ms
