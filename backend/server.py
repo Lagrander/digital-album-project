@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-云端电子相册 Flask 服务器
-- 模块化 WebUI 页面（基于 templates）
-- 增强的照片管理、多维度检索、自定义标签、快捷编辑
-- 设备专属状态面板与极客遥控、局域网轮询协议
-- 智能助手交互审计与香薰联动
+@file server.py
+@brief 极客相册云端中控服务器与 RESTful API 提供端
+
+@architecture
+核心 Web 服务，由 Flask 驱动。
+1. 状态管理：使用 SQLite3 数据库维护照片瀑布流、香薰开启状态和环境配置。
+2. 设备心跳：响应设备的 HTTP 轮询（如 `/api/device/command`），实现云-边-端命令下发。
 """
 
 from __future__ import annotations
@@ -19,9 +21,12 @@ import html
 import uuid
 import time
 import datetime as dt
+import queue
+import threading
 from io import BytesIO
 from PIL import Image, ImageOps
 import config as cfg
+from websockets.sync.client import connect
 
 ROOT_DIR = Path(__file__).resolve().parent
 
@@ -69,6 +74,22 @@ DEVICE_STATE = {
     "aroma_channels": [0, 0, 0],
     "pending_command": None
 }
+
+# SSE 事件队列：voice_server 回调 → Web 前端实时推送
+_SSE_SUBSCRIBERS: list[queue.Queue] = []
+_SSE_LOCK = threading.Lock()
+
+def _sse_push(event: dict):
+    """向所有活跃 SSE 订阅者广播一条事件。"""
+    with _SSE_LOCK:
+        dead = []
+        for q in _SSE_SUBSCRIBERS:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _SSE_SUBSCRIBERS.remove(q)
 
 # DB 初始化与静默热迁移
 def _init_databases():
@@ -310,35 +331,89 @@ def api_dialogs_send():
     if not user_msg:
         return jsonify({"ok": False, "error": "空消息"})
     
+    is_online = (time.time() - DEVICE_STATE["last_seen"]) < 30
+    if not is_online:
+        return jsonify({"ok": False, "error": "设备已离线"})
+    
     # 记录用户发言
     conn = sqlite3.connect(str(UPLOAD_DB_PATH))
     conn.execute("INSERT INTO dialog_history (sender, content, created_at) VALUES (?, ?, datetime('now', 'localtime'))", ("user", user_msg))
-    
-    # 简易情感规则引擎与香薰联动
-    ai_reply = "我听到了。为您准备了一张温暖的照片，希望您能喜欢。"
-    aroma_change = None
-    photo_change = None
-
-    if "累" in user_msg or "疲惫" in user_msg or "压力" in user_msg or "薰衣草" in user_msg:
-        ai_reply = "抱歉听到您今天这么疲惫。已自动为您开启 1 号「薰衣草」香薰阀门，这抹花香具有很好的舒缓助眠功效。同时，相册已为您切换到一张宁静悠闲的旅行风景照，愿这片晚霞带给您片刻的温柔。"
-        aroma_change = "通道1(薰衣草)开启"
-        DEVICE_STATE["pending_command"] = {"cmd": "toggle_aroma", "channel": 0, "state": 1}
-    elif "开心" in user_msg or "兴奋" in user_msg or "茉莉" in user_msg:
-        ai_reply = "感受到您的愉悦！已为您开启 2 号「茉莉」香薰，清新的香气与您的好心情绝配。"
-        aroma_change = "通道2(茉莉)开启"
-        DEVICE_STATE["pending_command"] = {"cmd": "toggle_aroma", "channel": 1, "state": 1}
-    elif "平静" in user_msg or "禅" in user_msg or "檀香" in user_msg:
-        ai_reply = "已为您开启 3 号「檀香」香薰。凝神静气，享受这一刻的静谧。"
-        aroma_change = "通道3(檀香)开启"
-        DEVICE_STATE["pending_command"] = {"cmd": "toggle_aroma", "channel": 2, "state": 1}
-    
-    # 记录 AI 回复与事件联动
-    conn.execute("INSERT INTO dialog_history (sender, content, aroma_change, photo_change_id, created_at) VALUES (?, ?, ?, ?, datetime('now', 'localtime'))", 
-                 ("ai", ai_reply, aroma_change, photo_change))
     conn.commit()
     conn.close()
 
-    return jsonify({"ok": True, "reply": ai_reply, "aroma_change": aroma_change})
+    # 通过内部 RPC 立即下发指令给 voice_server.py（跳过 ESP32 的 5 秒长轮询）
+    try:
+        with connect("ws://127.0.0.1:8888") as ws:
+            ws.send(json.dumps({
+                "event": "flask_rpc",
+                "cmd": "simulate_text",
+                "text": user_msg
+            }))
+    except Exception as e:
+        print(f"⚠️  [Flask] 内部转发请求给 voice_server 失败: {e}")
+
+    return jsonify({"ok": True, "delivered": True})
+
+@app.route("/api/dialogs/cancel", methods=["POST"])
+def api_dialogs_cancel():
+    try:
+        with connect("ws://127.0.0.1:8888") as ws:
+            ws.send(json.dumps({
+                "event": "flask_rpc",
+                "cmd": "simulate_text",
+                "text": "[CANCEL]"
+            }))
+    except Exception as e:
+        print(f"⚠️  [Flask] 内部转发撤回请求失败: {e}")
+    return jsonify({"ok": True})
+
+@app.route("/api/dialogs/stream")
+def api_dialogs_stream():
+    """SSE 端点：向 Web 前端实时推送 AI 回复文本。"""
+    def event_generator():
+        q: queue.Queue = queue.Queue(maxsize=50)
+        with _SSE_LOCK:
+            _SSE_SUBSCRIBERS.append(q)
+        try:
+            while True:
+                try:
+                    event = q.get(timeout=25)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    # 心跳包，防止连接超时断开
+                    yield "data: {\"type\": \"heartbeat\"}\n\n"
+        finally:
+            with _SSE_LOCK:
+                if q in _SSE_SUBSCRIBERS:
+                    _SSE_SUBSCRIBERS.remove(q)
+
+    return Response(
+        event_generator(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+        }
+    )
+
+@app.route("/api/internal/llm_reply", methods=["POST"])
+def api_internal_llm_reply():
+    """内部回调接口：voice_server.py 在 LLM 回复完成后调用此接口推送文本给 Web UI。"""
+    data = request.json or {}
+    reply_text = data.get("reply", "").strip()
+    if not reply_text:
+        return jsonify({"ok": False, "error": "空回复"})
+    
+    # 存入对话历史
+    conn = sqlite3.connect(str(UPLOAD_DB_PATH))
+    conn.execute("INSERT INTO dialog_history (sender, content, created_at) VALUES (?, ?, datetime('now', 'localtime'))", ("ai", reply_text))
+    conn.commit()
+    conn.close()
+    
+    # SSE 广播
+    _sse_push({"type": "ai_reply", "reply": reply_text})
+    return jsonify({"ok": True})
 
 @app.route("/api/dialogs/history", methods=["GET"])
 def api_dialogs_history():
@@ -347,7 +422,11 @@ def api_dialogs_history():
     rows = conn.execute("SELECT id, sender, content, aroma_change, photo_change_id, created_at FROM dialog_history ORDER BY id ASC").fetchall()
     result = [dict(r) for r in rows]
     conn.close()
-    return jsonify({"history": result})
+    response = jsonify({"history": result})
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route("/api/dialogs/clear", methods=["POST"])
 def api_dialogs_clear():
@@ -469,6 +548,13 @@ def images(subpath: str):
     if not filepath.is_file(): abort(404)
     return send_file(str(filepath))
 
+@app.get("/music/<path:subpath>")
+def music(subpath: str):
+    # 提供 MP3 流媒体服务
+    filepath = ROOT_DIR / "music" / subpath
+    if not filepath.is_file(): abort(404)
+    return send_file(str(filepath))
+
 # ESP32 核心依赖接口（保持原样兼容）
 @app.get("/api/today")
 def api_today():
@@ -503,7 +589,27 @@ def api_today():
             })
         except Exception: pass
 
+    tag = request.args.get("tag")
+    if tag:
+        tag_lower = tag.strip().lower()
+        matched_items = []
+        for it in items:
+            c_str = (it["caption"] or "").lower()
+            ct_str = (it["city"] or "").lower()
+            s_str = (it["side"] or "").lower()
+            if tag_lower in c_str or tag_lower in ct_str or tag_lower in s_str:
+                matched_items.append(it)
+        if matched_items:
+            matched_items.sort(key=lambda x: x["memory"], reverse=True)
+            chosen = matched_items[:DAILY_PHOTO_QUANTITY]
+            return {
+                "date": str(today), "target_md": target_md, "count": len(chosen),
+                "photos": [{"id": p["id"], "date": p["date"], "side": p["side"], "caption": p["caption"],
+                            "memory": p["memory"], "city": p["city"], "lat": p["lat"], "lon": p["lon"]} for p in chosen]
+            }
+
     by_md = {}
+
     for it in items: by_md.setdefault(it["md"], []).append(it)
     for arr in by_md.values(): arr.sort(key=lambda x: x["memory"], reverse=True)
 
@@ -542,6 +648,21 @@ def api_today():
         "photos": [{"id": p["id"], "date": p["date"], "side": p["side"], "caption": p["caption"],
                     "memory": p["memory"], "city": p["city"], "lat": p["lat"], "lon": p["lon"]} for p in chosen],
     }
+
+@app.get("/api/photo/search")
+def api_photo_search():
+    """搜索照片数据库，返回最佳匹配的 JSON 元数据。
+    由 voice_server.py 宏解析时调用。"""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "missing q parameter"}), 400
+    rows, total = load_rows(query=q, page_size=1, sort="memory")
+    if rows:
+        photo = rows[0]
+        photo_id = Path(photo["path"]).stem
+        photo["url"] = f"http://{request.host}/api/photo/{photo_id}.jpg"
+        return jsonify(photo)
+    return jsonify({"error": "no match"}), 404
 
 @app.get("/api/photo/<photo_id>.rgb565")
 def api_photo_rgb565(photo_id: str):
@@ -684,4 +805,4 @@ if __name__ == "__main__":
     print(f" - 设备状态: DEVICE_STATE 已初始化")
     print(f" - DB 挂载: tags, hidden 字段以及 dialog_history 表已更新")
     print(f"=========================================")
-    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=True)
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=True, use_reloader=False)

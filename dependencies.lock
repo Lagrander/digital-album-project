@@ -56,7 +56,7 @@ dependencies:
       require: private
       version: '>=4.2'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.8.0
   espressif/esp-sr:
@@ -119,12 +119,13 @@ direct_dependencies:
 - esp-idf-lib/pcf8574
 - espressif/aht20
 - espressif/cmake_utilities
+- espressif/esp-dsp
 - espressif/esp-sr
 - espressif/esp_lvgl_port
 - espressif/esp_websocket_client
 - espressif/i2c_bus
 - idf
 - lvgl/lvgl
-manifest_hash: c6a4257e40bac6aa9808b25e85f101a0e59ca49b02de2654528b13a6b06885eb
+manifest_hash: 138c40e4738bdbd680280f497e19e92e73cf46c377efbb989ebc4339eed3d430
 target: esp32s3
 version: 3.0.0

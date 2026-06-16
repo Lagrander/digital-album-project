@@ -22,8 +22,9 @@ esp_err_t mpu6050_init(void) {
   if (mpu6050_initialized)
     return ESP_OK;
 
-  // I2C 已经在 main 或 lcd 初始化时配置过，此处不需要重复调用 i2c_param_config 和 i2c_driver_install
-  // 否则会重置 I2C 硬件状态机，导致整个 I2C 总线超时死锁。
+  // I2C 已经在 main 或 lcd 初始化时配置过，此处不需要重复调用 i2c_param_config
+  // 和 i2c_driver_install 否则会重置 I2C 硬件状态机，导致整个 I2C
+  // 总线超时死锁。
 
   i2c_bus_lock();
   esp_err_t err = tca9548a_select_channel(1);
@@ -56,6 +57,10 @@ esp_err_t mpu6050_init(void) {
   return err;
 }
 
+static int16_t s_last_accel_x = 0;
+static int16_t s_last_accel_y = 0;
+static int16_t s_last_accel_z = 0;
+
 esp_err_t mpu6050_read_accel(int16_t *x, int16_t *y, int16_t *z) {
   if (!mpu6050_initialized || !x || !y || !z)
     return ESP_ERR_INVALID_STATE;
@@ -78,6 +83,10 @@ esp_err_t mpu6050_read_accel(int16_t *x, int16_t *y, int16_t *z) {
     *x = (int16_t)((data[0] << 8) | data[1]);
     *y = (int16_t)((data[2] << 8) | data[3]);
     *z = (int16_t)((data[4] << 8) | data[5]);
+    // 写入最新缓存
+    s_last_accel_x = *x;
+    s_last_accel_y = *y;
+    s_last_accel_z = *z;
   }
   return err;
 }
@@ -109,7 +118,7 @@ void peripheral_mpu6050(void) {
     }
 
     // 连续 2 次判定一致，且状态发生变化时才触发 UI 旋转
-    if (portrait_count >= 2 && !current_is_portrait) {
+    if (portrait_count >= 3 && !current_is_portrait) {
       current_is_portrait = true;
       ESP_LOGI(TAG, "Orientation changed to Portrait.");
       ui_set_screen_rotation(true);
@@ -125,4 +134,13 @@ void peripheral_mpu6050(void) {
 cleanup:
   tca9548a_disable_all_channels(); // 读完后关闭总线
   i2c_bus_unlock();
+}
+
+esp_err_t mpu6050_get_latest_accel(int16_t *x, int16_t *y, int16_t *z) {
+  if (!x || !y || !z)
+    return ESP_ERR_INVALID_ARG;
+  *x = s_last_accel_x;
+  *y = s_last_accel_y;
+  *z = s_last_accel_z;
+  return ESP_OK;
 }

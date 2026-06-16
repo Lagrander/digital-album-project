@@ -12,7 +12,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import io
-from PIL import Image, ExifTags, ImageOps
+from PIL import Image, ExifTags, ImageOps, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 import pillow_heif
 import datetime
 import sys
@@ -126,7 +127,7 @@ def _read_bytes_with_nas_retry(path: Path) -> bytes:
 
 # ================== 配置区域（来自 config.py） ==================
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 # 要扫描的图片目录
 IMAGE_DIR = Path(str(getattr(cfg, "IMAGE_DIR", "") or "")).expanduser()
@@ -181,7 +182,7 @@ else:
 # 发送给 VLM 之前，先把图片长边缩放到该值（像素）。
 # 0 表示不缩放。
 # 本地推理可保持较高值；云端推理建议降低（减少 token/成本）。
-VLM_MAX_LONG_EDGE = int(getattr(cfg, "VLM_MAX_LONG_EDGE", 2560) or 2560)
+VLM_MAX_LONG_EDGE = int(getattr(cfg, "VLM_MAX_LONG_EDGE", 1024) or 1024)
 
 # 中文城市数据库位置
 WORLD_CITIES_CSV = Path(str(getattr(cfg, "WORLD_CITIES_CSV", "data/world_cities_zh.csv") or "data/world_cities_zh.csv")).expanduser()
@@ -265,7 +266,7 @@ def encode_image_to_b64(path: Path) -> str:
 
         out = io.BytesIO()
         # quality 92 在观感和体积之间比较平衡；optimize 可能更慢但通常能降体积
-        img.save(out, format="JPEG", quality=92, optimize=True)
+        img.save(out, format="JPEG", quality=80, optimize=True)
         clean_bytes = out.getvalue()
         return base64.b64encode(clean_bytes).decode("utf-8")
 
@@ -924,7 +925,7 @@ def _post_with_channel_fallback(
 
         try:
             try:
-                resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+                resp = requests.post(url, headers=headers, json=body, timeout=timeout, proxies={"http": None, "https": None})
             except Exception as e:
                 print(f"[WARN] 渠道 {ch_label} 请求异常：{e}，尝试下一个渠道")
                 last_error = str(e)

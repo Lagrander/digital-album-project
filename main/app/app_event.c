@@ -153,6 +153,10 @@ static void app_event_task(void *arg)
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Event id=%d failed: %s", event.id, esp_err_to_name(ret));
             }
+            if (event.text_arg != NULL) {
+                free((void *)event.text_arg);
+                event.text_arg = NULL;
+            }
         }
     }
 }
@@ -222,16 +226,18 @@ esp_err_t app_event_send_text(app_event_id_t id, const char *text_arg)
     app_event_t event = {
         .id = id,
         .param = 0,
-        .text_arg = text_arg,
+        .text_arg = strdup(text_arg),
     };
 
     esp_err_t ret = app_event_init();
     if (ret != ESP_OK) {
+        free((void *)event.text_arg);
         return ret;
     }
 
     if (xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
         ESP_LOGE(TAG, "Queue full, drop text event id=%d", id);
+        free((void *)event.text_arg);
         return ESP_ERR_NO_MEM;
     }
 

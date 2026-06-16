@@ -1,3 +1,13 @@
+/**
+ * @file ws_voice.c
+ * @brief 全双工流式 WebSocket 音频通信链路
+ *
+ * @architecture
+ * 构建与 Python 后端（voice_server.py）的通信：
+ * 1. 上行 (Uplink)：持续发送 16kHz/16bit PCM 裸流。
+ * 2. 下行 (Downlink)：接收服务端分块推送的 TTS PCM 数据，并存入缓冲供给播放器消费。
+ * 3. 状态交互：处理 LLM 实时下发的 JSON 控制帧，实现极低延迟的全双工打断。
+ */
 /*
  * ws_voice.c — LLM 语音对话 WebSocket 客户端实现
  *
@@ -24,10 +34,14 @@
 
 static const char *TAG = "ws_voice";
 
-/* 内部常量 */
-#define WS_BUF_SIZE 8192    /* WebSocket 接收缓冲区大小        */
-#define WS_TASK_STACK 8192  /* WebSocket 内部任务栈大小        */
-#define WS_RECON_STACK 4096 /* 重连监视任务栈大小              */
+/* 内部常量 
+ * 注意：由于 sdkconfig 中 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384，
+ * 为了强制将 WebSocket 任务栈和接收缓冲分配在 PSRAM 中，以节省极度紧张的内部 RAM，
+ * 此处必须将大小设置得大于 16KB。
+ */
+#define WS_BUF_SIZE 17000    /* WebSocket 接收缓冲区大小 (大于16KB分配至PSRAM) */
+#define WS_TASK_STACK 17000  /* WebSocket 内部任务栈大小 (大于16KB分配至PSRAM) */
+#define WS_RECON_STACK 2048  /* 重连监视任务栈大小              */
 
 /*
  * WebSocket 客户端实例（不透明类型）。
@@ -39,7 +53,7 @@ struct ws_voice {
   bool connected;                       /* 当前连接状态              */
   ws_voice_cb_t callback;               /* 事件回调函数指针          */
   void *user_ctx;                       /* 用户上下文，透传给回调    */
-  TaskHandle_t recon_task;              /* 重连监视任务句柄          */
+  ws_voice_event_t last_data_type;      /* 上一次接收到的非 continuation 数据帧类型 */
 };
 
 /* ── 内部事件转发 ───────────────────────────────────────────── */
@@ -74,12 +88,19 @@ static void evt_handler(void *arg, esp_event_base_t base, int32_t event_id,
   case WEBSOCKET_EVENT_DATA:
     evt.data = (const uint8_t *)d->data_ptr;
     evt.data_len = d->data_len;
-    if (d->op_code == 0x01)
+    evt.payload_offset = d->payload_offset;
+    evt.payload_len = d->payload_len;
+    if (d->op_code == 0x01) {
+      ws->last_data_type = WS_VOICE_DATA_TEXT;
       evt.type = WS_VOICE_DATA_TEXT;
-    else if (d->op_code == 0x02)
+    } else if (d->op_code == 0x02) {
+      ws->last_data_type = WS_VOICE_DATA_BINARY;
       evt.type = WS_VOICE_DATA_BINARY;
-    else
+    } else if (d->op_code == 0x00) {
+      evt.type = ws->last_data_type;
+    } else {
       evt.type = WS_VOICE_DATA_BINARY;
+    }
     break;
   case WEBSOCKET_EVENT_ERROR:
     ws->connected = false;
@@ -91,25 +112,7 @@ static void evt_handler(void *arg, esp_event_base_t base, int32_t event_id,
   ws->callback(&evt, ws->user_ctx);
 }
 
-/* ── 重连监视任务 ───────────────────────────────────────────── */
-
-/*
- * 后台重连任务: 每 5 秒检查一次连接状态。
- * 若未连接且启用了 auto_reconnect，则停止旧连接后重新发起。
- * 仅由 ws_voice_connect() 创建，ws_voice_disconnect() 中销毁。
- */
-static void recon_task_fn(void *arg) {
-  ws_voice_t *ws = (ws_voice_t *)arg;
-  while (1) {
-    if (!ws->connected && ws->handle && ws->auto_reconnect) {
-      ESP_LOGI(TAG, "Reconnecting...");
-      esp_websocket_client_stop(ws->handle);
-      vTaskDelay(pdMS_TO_TICKS(100));
-      esp_websocket_client_start(ws->handle);
-    }
-    vTaskDelay(pdMS_TO_TICKS(5000));
-  }
-}
+/* 删除了旧的 recon_task_fn，交由底层 esp_websocket_client 自动重连 */
 
 /* ── 公开 API ───────────────────────────────────────────────── */
 
@@ -145,8 +148,10 @@ esp_err_t ws_voice_connect(ws_voice_t *ws) {
       .uri = ws->uri,
       .buffer_size = WS_BUF_SIZE,
       .task_stack = WS_TASK_STACK,
-      .reconnect_timeout_ms = 10000,
-      .network_timeout_ms = 10000,
+      .reconnect_timeout_ms = 5000,   /* 重连间隔 5s，给 TIME_WAIT 释放时间 */
+      .network_timeout_ms = 10000,     /* 网络超时 10s，给握手更多时间 */
+      .ping_interval_sec = 10,         /* PING 降低频率，减少与音频发送的碰撞     */
+      .pingpong_timeout_sec = 30,      /* PONG 超时放宽，容忍 TCP 缓冲区拥塞      */
   };
 
   ws->handle = esp_websocket_client_init(&cfg);
@@ -166,11 +171,7 @@ esp_err_t ws_voice_connect(ws_voice_t *ws) {
     return ret;
   }
 
-  /* 启动自动重连监视任务 */
-  if (ws->auto_reconnect && !ws->recon_task) {
-    xTaskCreate(recon_task_fn, "ws_recon", WS_RECON_STACK, ws, 5,
-                &ws->recon_task);
-  }
+  /* 启动自动重连监视任务 - 废除，依赖底层 reconnect_timeout_ms */
   return ESP_OK;
 }
 
@@ -181,10 +182,6 @@ esp_err_t ws_voice_connect(ws_voice_t *ws) {
 void ws_voice_disconnect(ws_voice_t *ws) {
   if (!ws)
     return;
-  if (ws->recon_task) {
-    vTaskDelete(ws->recon_task);
-    ws->recon_task = NULL;
-  }
   if (ws->handle) {
     esp_websocket_client_stop(ws->handle);
     esp_websocket_client_destroy(ws->handle);
@@ -193,14 +190,18 @@ void ws_voice_disconnect(ws_voice_t *ws) {
   ws->connected = false;
 }
 
-bool ws_voice_is_connected(const ws_voice_t *ws) { return ws && ws->connected; }
+bool ws_voice_is_connected(const ws_voice_t *ws) {
+  if (!ws || !ws->handle) return false;
+  // 双重校验：软件标志与原生驱动物理连接状态共同核对，避开状态机死锁导致盲目发送数据
+  return ws->connected && esp_websocket_client_is_connected(ws->handle);
+}
 
 /*
  * 发送文本帧。
  * timeout_ms 会转换为 FreeRTOS ticks。返回 -1 表示未连接。
  */
 int ws_voice_send_text(ws_voice_t *ws, const char *text, int timeout_ms) {
-  if (!ws || !ws->handle || !ws->connected)
+  if (!ws || !ws->handle || !ws_voice_is_connected(ws))
     return -1;
   return esp_websocket_client_send_text(ws->handle, text, strlen(text),
                                         timeout_ms / portTICK_PERIOD_MS);
@@ -212,7 +213,7 @@ int ws_voice_send_text(ws_voice_t *ws, const char *text, int timeout_ms) {
  */
 int ws_voice_send_binary(ws_voice_t *ws, const uint8_t *data, size_t len,
                          int timeout_ms) {
-  if (!ws || !ws->handle || !ws->connected)
+  if (!ws || !ws->handle || !ws_voice_is_connected(ws))
     return -1;
   return esp_websocket_client_send_bin(ws->handle, (const char *)data, len,
                                        timeout_ms / portTICK_PERIOD_MS);

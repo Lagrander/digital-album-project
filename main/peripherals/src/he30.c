@@ -1,3 +1,10 @@
+/**
+ * @file he30.c
+ * @brief 三通道香薰电磁阀隔离驱动器
+ *
+ * @architecture
+ * 封装 PCF8574 IO，实现微安级弱电平控制，以隔离驱动 HE30 大电流工作板。
+ */
 #include "he30.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -25,16 +32,16 @@ he30_handle_t he30_init(ext_io_pin_t pin, bool active_low) {
 }
 
 esp_err_t he30_on(he30_handle_t handle) {
-  ESP_LOGI(TAG, "[DEBUG] he30_on: taking pcf8574_mutex");
+  ESP_LOGD(TAG, "he30_on: taking pcf8574_mutex");
   if (pcf8574_mutex && xSemaphoreTake(pcf8574_mutex, portMAX_DELAY) == pdTRUE) {
-    ESP_LOGI(TAG, "[DEBUG] he30_on: pcf8574_mutex TAKEN. Calling pcf8574_write_pin");
+    ESP_LOGD(TAG, "he30_on: pcf8574_mutex TAKEN. Calling pcf8574_write_pin");
     uint32_t level = handle.active_low ? 0 : 1;
     esp_err_t ret = pcf8574_write_pin(handle.pin, level);
-    ESP_LOGI(TAG, "[DEBUG] he30_on: pcf8574_write_pin returned %d. Giving pcf8574_mutex", ret);
+    ESP_LOGD(TAG, "he30_on: pcf8574_write_pin returned %d. Giving pcf8574_mutex", ret);
     xSemaphoreGive(pcf8574_mutex);
     return ret;
   }
-  ESP_LOGE(TAG, "[DEBUG] he30_on: Failed to take pcf8574_mutex");
+  ESP_LOGE(TAG, "he30_on: Failed to take pcf8574_mutex");
   return ESP_FAIL;
 }
 
@@ -101,7 +108,7 @@ void he30_set_target(int index, bool target) {
   if (pcf8574_mutex && xSemaphoreTake(pcf8574_mutex, portMAX_DELAY) == pdTRUE) {
     target_state[index] = target;
     xSemaphoreGive(pcf8574_mutex);
-    ESP_LOGI(TAG, "Target for module %d set to %d", index, target);
+    ESP_LOGD(TAG, "Target for module %d set to %d", index, target);
   }
 }
 
@@ -121,13 +128,13 @@ void he30_sync(void) {
     }
 
     if (target != he30_handles[i].is_on) {
-      ESP_LOGI(TAG, "[DEBUG] he30_sync: About to call he30_on/off for module %d, target=%d", i, target);
+      ESP_LOGD(TAG, "he30_sync: About to call he30_on/off for module %d, target=%d", i, target);
       esp_err_t ret = (target) ? he30_on(he30_handles[i].handle)
                                : he30_off(he30_handles[i].handle);
-      ESP_LOGI(TAG, "[DEBUG] he30_sync: Returned from he30_on/off with code %d", ret);
+      ESP_LOGD(TAG, "he30_sync: Returned from he30_on/off with code %d", ret);
       if (ret == ESP_OK) {
         he30_handles[i].is_on = target;
-        ESP_LOGI(TAG, "Module %d synced to target %d", i, target);
+        ESP_LOGD(TAG, "Module %d synced to target %d", i, target);
       } else {
         ESP_LOGE(TAG, "Sync failed for module %d: %s", i,
                  esp_err_to_name(ret));

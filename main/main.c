@@ -7,6 +7,7 @@
 #include "aht20_sensor.h"
 #include "app_event.h"
 #include "audio_player.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "freertos/FreeRTOS.h"
@@ -15,6 +16,7 @@
 #include "lvgl_ui_task.h"
 #include "net_mgr.h"
 #include "peripherals_task.h"
+#include "voice_assistant.h"
 #include "voice_assistant_task.h"
 #include "waveshare_rgb_lcd_port.h"
 #include <stdio.h>
@@ -31,7 +33,7 @@ static const char *TAG = "main";
 static void sntp_init_and_sync(void) {
   esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
   esp_sntp_setservername(0, "pool.ntp.org");
-  esp_sntp_setservername(1, "ntp.aliyun.com");
+  esp_sntp_setservername(1, "time.google.com");
   esp_sntp_setservername(2, "time.nist.gov");
   esp_sntp_init();
 
@@ -53,22 +55,6 @@ static void sntp_init_and_sync(void) {
 
 /* ── main ──────────────────────────────────────────────────── */
 
-static void mic_test_task(void *pvParameters) {
-  ESP_LOGI("MIC_TEST", "Starting microphone test...");
-  while (1) {
-    float rms = 0.0f;
-    // 采集 200 毫秒的音频并计算 RMS 能量值（音量大小）
-    esp_err_t err = i2s_mic_input_read_rms(&rms, 200);
-    if (err == ESP_OK) {
-      // 你可以通过对着麦克风吹气或说话，观察这个值是否明显变大
-      ESP_LOGI("MIC_TEST", "Volume (RMS): %.2f", rms);
-    } else {
-      ESP_LOGE("MIC_TEST", "Mic read failed: %s", esp_err_to_name(err));
-    }
-    vTaskDelay(pdMS_TO_TICKS(100)); // 歇一小会儿
-  }
-}
-
 /**
  * @brief 应用程序主入口
  *
@@ -78,52 +64,45 @@ void app_main(void) {
 
   wavesahre_rgb_lcd_bl_off();
 
-  printf("PSRAM size: %d\n", heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+  ESP_LOGI(TAG, "PSRAM Total: %d bytes",
+           heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+  ESP_LOGI(TAG, "PSRAM Free before models: %d bytes, Largest block: %d bytes",
+           heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
-  /* 1. UI 线程初始化拉起 */
+  /* 0. 提前预加载语音模型，防止后续内存碎片化导致无法分配 连续内存 */
+  va_preload_models(0);
+
+  ESP_LOGI(TAG, "PSRAM Free after models: %d bytes, Largest block: %d bytes",
+           heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+
+  /* 1. 网络连接初始化 */
+  ESP_LOGI(TAG, "Starting Wi-Fi...");
+  net_mgr_init();
+
+  /* 2. UI 线程初始化拉起 */
   app_ui_init();
 
-  // 延迟点亮背光，避免白屏闪烁
   vTaskDelay(pdMS_TO_TICKS(100));
   wavesahre_rgb_lcd_bl_on();
 
-  /* 2. 网络连接初始化 */
-  ESP_LOGI(TAG, "Starting Wi-Fi...");
-  net_mgr_init();
-  esp_err_t ret = net_mgr_wait_connected(30000);
+  esp_err_t ret = net_mgr_wait_connected(3000); // 30000
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Wi-Fi failed, continuing with offline mode");
   }
 
   /* 3. 时间同步 */
   sntp_init_and_sync();
-
   /* 4. 外设与事件系统初始化（音频播放器 + 统一事件中心） */
   app_peripherals_init();
 
-  // // 初始化音频播放器
-  // esp_err_t ret_audio = audio_player_init();
-  // if (ret_audio != ESP_OK) {
-  //   ESP_LOGE(TAG, "audio_player_init failed: %s",
-  //   esp_err_to_name(ret_audio));
-  // }
-
-  // // 初始化全局事件中心
-  // esp_err_t ret_event = app_event_init();
-  // if (ret_event != ESP_OK) {
-  //   ESP_LOGE(TAG, "app_event_init failed: %s", esp_err_to_name(ret_event));
-  // }
-
-  // // 触发开机启动提示音事件
-  // app_event_send(APP_EVENT_PLAY_STARTUP, 0);
+  // 初始化全局事件中心
+  esp_err_t ret_event = app_event_init();
+  if (ret_event != ESP_OK) {
+    ESP_LOGE(TAG, "app_event_init failed: %s", esp_err_to_name(ret_event));
+  }
 
   /* 5. 语音助手（独立任务，内部等待 UI 就绪后启动 ESP-SR） */
-  // app_voice_assistant_init();
-
-  /* 6. 临时麦克风测试任务 */
-  // BaseType_t ret_task =
-  //     xTaskCreate(mic_test_task, "mic_test", 4096, NULL, 5, NULL);
-  // if (ret_task != pdPASS) {
-  //   ESP_LOGE(TAG, "Failed to create mic_test_task! Memory might be full.");
-  // }
+  app_voice_assistant_init();
 }

@@ -4,7 +4,7 @@
  * 完整语音对话流水线:
  *   1. WakeNet9  唤醒词检测（"你好小智"） → 进入录音态
  *   2. VADNet1   语音活动检测 + 实时音频流发送
- *   3. WebSocket 连接 Python 服务器 → 转发给阿里云 DashScope Qwen
+ *   3. WebSocket 连接 Python 服务器 → 本地 whisper + Ollama + edge-tts
  *   4. LLM 音频流返回 → 扬声器播放 → 回到录音态（连续对话）
  *
  * 同时支持 MultiNet7 本地命令词识别（照片浏览 + 雾化控制），
@@ -34,6 +34,16 @@ enum {
     VA_CMD_MIST_ON      = 210,  /* 打开雾化加湿器（3 路全开）        */
     VA_CMD_MIST_OFF     = 211,  /* 关闭雾化加湿器                    */
     VA_CMD_BYE          = 220,  /* 拜拜，退出连续对话模式            */
+
+    VA_CMD_VOL_UP       = 230,  /* 大声一点                          */
+    VA_CMD_VOL_DOWN     = 231,  /* 小声一点                          */
+    VA_CMD_BRIGHT_UP    = 240,  /* 调亮一点                          */
+    VA_CMD_BRIGHT_DOWN  = 241,  /* 调暗一点                          */
+    VA_CMD_MIST_LEVEL_UP   = 250,  /* 加大喷雾                       */
+    VA_CMD_MIST_LEVEL_DOWN = 251,  /* 减小喷雾                       */
+    VA_CMD_AUDIO_PLAY   = 260,  /* 播放音乐                          */
+    VA_CMD_AUDIO_STOP   = 261,  /* 停止播放/关掉声音                 */
+    VA_CMD_MODE_SLEEP   = 270,  /* 睡觉/休眠模式                     */
 };
 
 /* ── 回调函数集 ─────────────────────────────────────────────── */
@@ -85,7 +95,18 @@ typedef struct {
 /* ── 公开 API ───────────────────────────────────────────────── */
 
 /**
- * 一次性初始化语音助手。
+ * @brief 预加载 ESP-SR 语音模型
+ * 
+ * 应在系统启动的最早期调用，以防止内存碎片化导致分配连续大块 PSRAM 失败。
+ *
+ * @param det_mode 唤醒灵敏度 (推荐 90)
+ * @return esp_err_t ESP_OK 成功，ESP_FAIL 失败
+ */
+esp_err_t va_preload_models(int det_mode);
+
+/**
+ * @brief 初始化语音助手模块
+。
  * 依次完成: 等待 Wi-Fi → 初始化 I2S 音频 → 分配音频缓冲区 →
  *         连接 WebSocket → 加载 ESP-SR 模型。
  * 阻塞直到 Wi-Fi 就绪或超时（60 秒）。
@@ -117,6 +138,11 @@ void va_force_wake(void);
  * @return true 正在录音或等待 LLM 回复
  */
 bool va_is_active(void);
+
+/**
+ * @brief 发送文本消息到语音助手 WebSocket 连接中（线程安全）
+ */
+esp_err_t voice_assistant_send_text(const char *text);
 
 #ifdef __cplusplus
 }

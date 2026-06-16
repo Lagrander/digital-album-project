@@ -38,6 +38,8 @@ typedef struct {
     ws_voice_event_t type;    /* 事件类型                          */
     const uint8_t   *data;    /* 数据指针（文本帧或二进制帧）      */
     size_t           data_len;/* 数据长度（字节）                  */
+    size_t           payload_offset; /* 当前数据在整个 payload 的偏移 */
+    size_t           payload_len;    /* 整个 payload 的总长度 */
 } ws_voice_evt_t;
 
 /**

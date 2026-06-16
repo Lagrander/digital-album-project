@@ -36,6 +36,27 @@ void ui_voice_on_wake(void);
 /** 状态变化指示（0=等待唤醒, 1=录音中, 2=等待LLM回复） */
 void ui_voice_on_state(int state);
 
+/** 语音触发亮度+10 */
+void ui_voice_brightness_up(void);
+
+/** 语音触发亮度-10 */
+void ui_voice_brightness_down(void);
+
+/** 语音触发休眠模式 */
+void ui_voice_sleep(void);
+
+/** 休眠唤醒 */
+void ui_voice_wake_from_sleep(void);
+
+/** 查询是否处于休眠模式 */
+bool ui_is_sleep_mode(void);
+
+/** 云端指令：显示指定 URL 的照片，可设置 hold_mode */
+void ui_show_photo_from_url(const char *url, const char *hold_mode);
+
+/** 云端指令：解除锁定，恢复自动轮播 */
+void ui_resume_playlist(void);
+
 #ifdef __cplusplus
 }
 #endif

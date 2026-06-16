@@ -24,7 +24,7 @@ except ImportError:
     sys.exit(1)
 
 
-def make_charset(cjk_count=3755):
+def make_charset(cjk_count=6763):
     """
     Build the character set ordered by Unicode codepoint.
 
@@ -41,7 +41,7 @@ def make_charset(cjk_count=3755):
     for cp in range(0x20, 0x7F):
         chars.add(chr(cp))
 
-    # GB2312 Level 1 and 2 characters
+    # GB2312 Level 1 (3755 chars, 0xB0-0xD7) + Level 2 (3008 chars, 0xD8-0xF7)
     # If cjk_count <= 3755, only Level 1 (0xB0 to 0xD7) is included to save space.
     max_b1 = 0xD8 if cjk_count <= 3755 else 0xF8
     for b1 in range(0xB0, max_b1):
@@ -61,6 +61,7 @@ def make_charset(cjk_count=3755):
         0x00B7,  # middle dot (·)
         0x2103,  # Celsius sign (℃)
         0x25A0, 0x25A1, 0x25B2, 0x25BC, # Some geometric shapes
+        0x8046,  # 聆
     ]
     for cp in extra:
         chars.add(chr(cp))
@@ -325,8 +326,8 @@ def main():
     parser.add_argument("--ttc-index", type=int, default=0)
     parser.add_argument("--size", type=int, default=16, help="Font pixel size")
     parser.add_argument("--bpp", type=int, default=2, choices=[1, 2, 4])
-    parser.add_argument("--cjk-count", type=int, default=3755,
-                        help="Number of CJK characters to include (default: 3755 ≈ GB2312 Level 1)")
+    parser.add_argument("--cjk-count", type=int, default=6763,
+                        help="Number of CJK characters to include (default: 6763 ≈ full GB2312)")
     parser.add_argument("--output", required=True, help="Output .c file path")
     parser.add_argument("--name", required=True, help="Font variable name")
 

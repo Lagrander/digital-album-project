@@ -10,7 +10,7 @@ menu "Network Configuration"
 
     config SERVER_URL
         string "Photo Server URL"
-        default "http://192.168.1.100:8765"
+        default "http://192.168.74.192:8765"
 
     config DOWNLOAD_KEY
         string "Download Key"
@@ -158,33 +158,33 @@ menu "Voice Assistant"
 
     config VA_WS_URI
         string "LLM WebSocket Server URL"
-        default "ws://192.168.1.100:8888"
+        default "ws://192.168.74.192:8888"
         help
             WebSocket URI of the voice server (voice_server.py).
 
     menu "I2S Microphone (INMP441)"
         config VA_MIC_WS_PIN
             int "MIC WS (LRCLK) GPIO"
-            default 6
+            default 11
             range 0 48
         config VA_MIC_SCK_PIN
             int "MIC SCK (BCLK) GPIO"
-            default 15
+            default 12
             range 0 48
         config VA_MIC_SD_PIN
             int "MIC SD (DATA) GPIO"
-            default 16
+            default 6
             range 0 48
     endmenu
 
     menu "I2S Speaker (MAX98357A)"
         config VA_SPK_BCLK_PIN
             int "SPK BCLK GPIO"
-            default 11
+            default 12
             range 0 48
         config VA_SPK_LRCK_PIN
             int "SPK LRCLK GPIO"
-            default 12
+            default 11
             range 0 48
         config VA_SPK_DIN_PIN
             int "SPK DIN GPIO"
@@ -192,10 +192,10 @@ menu "Voice Assistant"
             range 0 48
         config VA_SPK_SD_PIN
             int "SPK SD (Shutdown) GPIO"
-            default 19
-            range 0 48
+            default -1
+            range -1 48
             help
-                MAX98357A SD_MODE pin. High = active, Low/GND = shutdown.
+                MAX98357A SD_MODE pin. Set to -1 to keep the amplifier always on and disable GPIO control.
     endmenu
 
 endmenu

@@ -1,11 +1,23 @@
-// lv_voice_assistant.c
-#include "lv_voice_assistant.h"
+/**
+ * @file lv_voice_assistant.c
+ * @brief 情感语音交互视觉控制器
+ *
+ * @architecture
+ * 本文件负责实现语音唤醒后的流式 UI 渲染机制。
+ * 1. 动态状态渲染：将后端返回的 ASR/LLM 状态转换为对应的图标与微动画（如呼吸灯、波纹）。
+ * 2. 跨屏组件管理：无论是主屏还是照片流转页面，该控制器都负责通过 Layer 机制将唤醒动画强行覆盖在上层。
+ * 3. 资源解耦：动画的申请和销毁采用内存池和动态资源机制，防止爆内存。
+ */
+// 
+#include <stdio.h>
 #include "lvgl.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
+#include "lv_voice_assistant.h"
+#include "lvgl_port.h"
 
-static const char *TAG = "lv_voice_assistant";
+static const char *TAG = "";
 
 /* 导入中文字体 */
 extern const lv_font_t lv_font_cjk_16;
@@ -34,6 +46,59 @@ static uint32_t typewriter_index = 0;
 static void lv_va_create_dialog(void);
 static void va_stop_ripple_anims(void);
 static void va_exit_timer_cb(lv_timer_t *t);
+
+/* ── CJK 字体文本净化器 ──
+ * 问题根源：LVGL 字库仅含简体 CJK，当文本含 ASCII 空格(U+20) 或繁体字时，
+ * 每帧都会疯狂输出 [Warn] glyph not found 日志洪水，拖垮串口和调度器。
+ * 解决方案：在文本送入 lv_label 之前，逐字扫描 UTF-8 序列：
+ *   - ASCII 空格(0x20) → 替换为全角空格(U+3000 = \xe3\x80\x80)
+ *   - 繁体字/不支持字符 → 直接跳过（静默丢弃）
+ */
+static void sanitize_for_cjk_font(const char *src, char *dst, size_t dst_size) {
+    if (!src || !dst || dst_size < 4) { if (dst) dst[0] = '\0'; return; }
+    size_t di = 0;
+    const unsigned char *s = (const unsigned char *)src;
+    while (*s && di + 4 < dst_size) {
+        if (*s == 0x20) {
+            // ASCII 空格 → 全角空格 U+3000 (UTF-8: E3 80 80)
+            dst[di++] = '\xe3'; dst[di++] = '\x80'; dst[di++] = '\x80';
+            s++;
+        } else if (*s < 0x80) {
+            // ASCII 可打印字符（不含空格）直接保留
+            dst[di++] = (char)(*s++);
+        } else if ((*s & 0xF0) == 0xE0 && *(s+1) && *(s+2)) {
+            // 3字节 UTF-8 → 解码 Unicode 码点
+            uint32_t cp = ((uint32_t)(*s & 0x0F) << 12)
+                        | ((uint32_t)(*(s+1) & 0x3F) << 6)
+                        |  (uint32_t)(*(s+2) & 0x3F);
+            // 保留简体 CJK (U+4E00–U+9FFF) 和全角标点 (U+FF00–U+FFFF)
+            // 繁体字、扩展 CJK 等直接丢弃（避免 glyph dsc. not found 日志）
+            if ((cp >= 0x4E00 && cp <= 0x9FFF) ||
+                (cp >= 0xFF00 && cp <= 0xFFFF) ||
+                (cp >= 0x3000 && cp <= 0x303F)) {
+                dst[di++] = (char)*s;
+                dst[di++] = (char)*(s+1);
+                dst[di++] = (char)*(s+2);
+            }
+            // 繁体/不支持字符 → 静默跳过
+            s += 3;
+        } else if ((*s & 0xE0) == 0xC0 && *(s+1)) {
+            // 2字节 UTF-8（拉丁扩展等），尝试直接保留
+            dst[di++] = (char)*s;
+            dst[di++] = (char)*(s+1);
+            s += 2;
+        } else if ((*s & 0xF8) == 0xF0 && *(s+1) && *(s+2) && *(s+3)) {
+            // 4字节 UTF-8（Emoji 等），字库不含，静默跳过
+            s += 4;
+        } else {
+            s++;
+        }
+    }
+    dst[di] = '\0';
+}
+
+// 静态净化缓冲区（避免在回调里动态分配，预留前缀空间）
+static char s_sanitized_text[480];
 
 /* ── 动效底层回调函数 ── */
 static void va_anim_set_bg_opa_cb(void *var, int32_t v) {
@@ -145,9 +210,9 @@ static void lv_va_create_dialog(void) {
 
     // A. 顶部中文状态标签
     state_title = lv_label_create(dialog_box);
-    lv_label_set_text(state_title, "🤖 语音助手");
+    lv_label_set_text(state_title, "语音助手");
     lv_obj_set_style_text_font(state_title, &lv_font_cjk_16, 0);
-    lv_obj_set_style_text_color(state_title, lv_color_hex(0xA0A5B5), 0); // 优雅浅灰色
+    lv_obj_set_style_text_color(state_title, lv_color_hex(0xA0A5B5), 0); 
     lv_obj_align(state_title, LV_ALIGN_TOP_MID, 0, 4); // 微降4px获得更好的视觉呼吸感
 
     // B. 核心反馈区容器 (60x60)
@@ -160,8 +225,7 @@ static void lv_va_create_dialog(void) {
 
     // B1. 居中麦克风图标 label
     mic_icon = lv_label_create(feedback_container);
-    lv_label_set_text(mic_icon, "🎤");
-    lv_obj_set_style_text_font(mic_icon, &lv_font_cjk_16, 0);
+    lv_label_set_text(mic_icon, LV_SYMBOL_AUDIO);
     lv_obj_set_style_text_color(mic_icon, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(mic_icon, LV_ALIGN_CENTER, 0, 0);
 
@@ -251,6 +315,10 @@ void lv_va_init(void) {
 
 /* 显示对话框并进入指定状态 */
 void lv_va_show_state(LvVaState state) {
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW("lv_va", "Failed to lock LVGL for show_state");
+        return;
+    }
     // 退出状态外，若图层缺失，立即懒加载动态创建
     if (state != LV_VA_STATE_EXIT && !assistant_layer) {
         lv_va_create_dialog();
@@ -283,13 +351,13 @@ void lv_va_show_state(LvVaState state) {
             lv_anim_set_exec_cb(&a_card, va_anim_set_y_cb);
             lv_anim_start(&a_card);
             
-            lv_label_set_text(state_title, "🤖 语音助手");
+            lv_label_set_text(state_title, "语音助手");
             lv_obj_add_flag(loading_arc, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(mic_icon, LV_OBJ_FLAG_HIDDEN);
             break;
         }
         case LV_VA_STATE_LISTEN: {
-            lv_label_set_text(state_title, "🎤 聆听中...");
+            lv_label_set_text(state_title, "聆听中...");
             lv_obj_add_flag(loading_arc, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(mic_icon, LV_OBJ_FLAG_HIDDEN);
             
@@ -298,16 +366,15 @@ void lv_va_show_state(LvVaState state) {
             break;
         }
         case LV_VA_STATE_RECOGNIZE: {
-            lv_label_set_text(state_title, "🧠 识别中...");
+            lv_label_set_text(state_title, "识别中...");
             va_stop_ripple_anims();
             
-            // 在此模拟接收到语音文本：为 "打开雾化器"
+            // 由 lv_va_show_text() 设置实际识别文字
             lv_obj_clear_flag(user_label, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(user_label, "你：打开雾化器");
             break;
         }
         case LV_VA_STATE_THINK: {
-            lv_label_set_text(state_title, "🤖 思考中...");
+            lv_label_set_text(state_title, "思考中...");
             lv_obj_add_flag(mic_icon, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(loading_arc, LV_OBJ_FLAG_HIDDEN);
             
@@ -323,14 +390,16 @@ void lv_va_show_state(LvVaState state) {
             break;
         }
         case LV_VA_STATE_REPLY: {
-            lv_label_set_text(state_title, "💬 回复中...");
+            lv_label_set_text(state_title, "回复中...");
             lv_anim_del(loading_arc, va_arc_rotate_cb);
             lv_obj_add_flag(loading_arc, LV_OBJ_FLAG_HIDDEN);
             lv_obj_clear_flag(mic_icon, LV_OBJ_FLAG_HIDDEN); // 复原麦克风为点缀
             
-            // 启动打字机输出
+            // 由 lv_va_show_text() 设置实际 AI 回复
             lv_obj_clear_flag(ai_label, LV_OBJ_FLAG_HIDDEN);
-            strncpy(typewriter_text, "AI：好的，已为您开启雾化香薰通道。", sizeof(typewriter_text) - 1);
+            if (typewriter_text[0] == '\0') {
+                strncpy(typewriter_text, "小智：正在生成回复...", sizeof(typewriter_text) - 1);
+            }
             typewriter_index = 0;
             typewriter_timer = lv_timer_create(typewriter_timer_cb, 50, ai_label);
             break;
@@ -365,11 +434,17 @@ void lv_va_show_state(LvVaState state) {
         default:
             break;
     }
+    lvgl_port_unlock();
 }
 
 /* 隐藏并销毁对话框 */
 void lv_va_hide_dialog(void) {
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW("lv_va", "Failed to lock LVGL for hide_dialog");
+        return;
+    }
     lv_va_show_state(LV_VA_STATE_EXIT);
+    lvgl_port_unlock();
 }
 
 /* 本地唤醒词检测初始化（占位实现） */
@@ -380,5 +455,55 @@ void lv_va_wake_detect_init(void) {
 /* 发送文本到云端并获取回复（占位实现） */
 void lv_va_send_text_to_cloud(const char *text) {
     ESP_LOGI(TAG, "Sending text to cloud: %s", text);
+    if (text && strlen(text) > 0) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "你：%s", text);
+        lv_label_set_text(user_label, buf);
+    }
     lv_va_show_state(LV_VA_STATE_REPLY);
+}
+
+/* 显示真实对话文本 */
+void lv_va_show_text(const char *user_text, const char *ai_text, const char *emotion) {
+    if (!lvgl_port_lock(500)) {
+        ESP_LOGW("lv_va", "Failed to lock LVGL for show_text");
+        return;
+    }
+    if (!assistant_layer) {
+        lvgl_port_unlock();
+        return;
+    }
+
+    if (user_text && strlen(user_text) > 0) {
+        char buf[512];
+        // 净化文本，替换不在字库里的字符，消灭 glyph-not-found 日志洪水
+        sanitize_for_cjk_font(user_text, s_sanitized_text, sizeof(s_sanitized_text));
+        snprintf(buf, sizeof(buf), "你：%.470s", s_sanitized_text);
+        lv_obj_clear_flag(user_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(user_label, buf);
+    }
+
+    if (ai_text && strlen(ai_text) > 0) {
+        // 净化文本后再送入打字机效果
+        sanitize_for_cjk_font(ai_text, s_sanitized_text, sizeof(s_sanitized_text));
+        snprintf(typewriter_text, sizeof(typewriter_text), "小智：%.466s", s_sanitized_text);
+        typewriter_index = 0;
+        lv_label_set_text(ai_label, "");
+        lv_obj_clear_flag(ai_label, LV_OBJ_FLAG_HIDDEN);
+        if (typewriter_timer) {
+            lv_timer_del(typewriter_timer);
+        }
+        typewriter_timer = lv_timer_create(typewriter_timer_cb, 50, ai_label);
+    }
+
+    // 情绪驱动 UI 主题色
+    lv_color_t accent;
+    if (emotion) {
+        if (strcmp(emotion, "empathic") == 0)      accent = lv_color_hex(0xFF8C42); // 暖橙
+        else if (strcmp(emotion, "sad") == 0)      accent = lv_color_hex(0x5B9BD5); // 冷蓝
+        else if (strcmp(emotion, "happy") == 0)    accent = lv_color_hex(0xFFD700); // 亮黄
+        else                                       accent = lv_color_hex(0xFFFFFF); // 白
+        lv_obj_set_style_border_color(dialog_box, accent, 0);
+    }
+    lvgl_port_unlock();
 }

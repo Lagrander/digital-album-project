@@ -1,3 +1,12 @@
+/**
+ * @file voice_assistant_task.c
+ * @brief 本地唤醒与语音助手任务总控
+ *
+ * @architecture
+ * 整合 ESP-SR 的 WakeNet 与音频管线：
+ * 1. 负责 INMP441 麦克风的唤醒词侦测。
+ * 2. 唤醒后挂起主循环，启动基于 WebSocket 的流式 ASR/LLM 对话机制。
+ */
 /*
  * voice_assistant_task.c — 语音助手任务包装实现
  *
@@ -20,12 +29,16 @@
 #include "voice_assistant_task.h"
 #include "voice_assistant.h"
 #include "lvgl_ui_task.h"
+#include "../../lv_ui/src/lv_voice_assistant.h"
 #include "peripherals_task.h"
 #include "sdkconfig.h"
+#include "voice_io.h"
+#include "stream_player.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include <string.h>
 
 static const char *TAG = "voice_task";
 
@@ -62,6 +75,51 @@ static void va_on_command(int cmd_id, void *ctx)
         ESP_LOGI(TAG, "Voice → mist off");
         peripherals_mist_off();
         break;
+    case VA_CMD_VOL_UP: {
+        uint8_t vol = voice_io_get_spk_volume();
+        if (vol <= 90) vol += 10; else vol = 100;
+        voice_io_set_spk_volume(vol);
+        ESP_LOGI(TAG, "Voice → volume up: %d%%", vol);
+        break;
+    }
+    case VA_CMD_VOL_DOWN: {
+        uint8_t vol = voice_io_get_spk_volume();
+        if (vol >= 10) vol -= 10; else vol = 0;
+        voice_io_set_spk_volume(vol);
+        ESP_LOGI(TAG, "Voice → volume down: %d%%", vol);
+        break;
+    }
+    case VA_CMD_BRIGHT_UP:
+        ESP_LOGI(TAG, "Voice → brightness up");
+        ui_voice_brightness_up();
+        break;
+    case VA_CMD_BRIGHT_DOWN:
+        ESP_LOGI(TAG, "Voice → brightness down");
+        ui_voice_brightness_down();
+        break;
+    case VA_CMD_MIST_LEVEL_UP:
+        ESP_LOGI(TAG, "Voice → mist level up");
+        peripherals_mist_level_up();
+        break;
+    case VA_CMD_MIST_LEVEL_DOWN:
+        ESP_LOGI(TAG, "Voice → mist level down");
+        peripherals_mist_level_down();
+        break;
+    case VA_CMD_AUDIO_PLAY: {
+        char url[128];
+        snprintf(url, sizeof(url), "%s/music/test.mp3", CONFIG_SERVER_URL);
+        ESP_LOGI(TAG, "Voice → audio play: %s", url);
+        stream_player_play_url(url);
+        break;
+    }
+    case VA_CMD_AUDIO_STOP:
+        ESP_LOGI(TAG, "Voice → audio stop");
+        stream_player_stop();
+        break;
+    case VA_CMD_MODE_SLEEP:
+        ESP_LOGI(TAG, "Voice → sleep mode");
+        ui_voice_sleep();
+        break;
     default:
         break;
     }
@@ -78,7 +136,11 @@ static void va_on_wake(void *ctx)
 {
     (void)ctx;
     ESP_LOGI(TAG, "Wake word detected!");
+    if (ui_is_sleep_mode()) {
+        ui_voice_wake_from_sleep();
+    }
     ui_voice_on_wake();
+    lv_va_show_state(LV_VA_STATE_WAKE);
 }
 
 /*
@@ -104,6 +166,13 @@ static void va_on_state_change(int state, void *ctx)
 {
     (void)ctx;
     ui_voice_on_state(state);
+    // 映射 voice_assistant 状态机 → LVGL VA UI 状态
+    // 0=ST_WAITING_WAKEUP  1=ST_RECORDING  2=ST_WAITING_RESP
+    switch (state) {
+    case 0: /* 等待唤醒 → IDLE，UI 自动 EXIT */ break;
+    case 1: lv_va_show_state(LV_VA_STATE_LISTEN); break;
+    case 2: lv_va_show_state(LV_VA_STATE_THINK); break;
+    }
 }
 
 /* ── 任务入口 ───────────────────────────────────────────────── */
@@ -130,7 +199,7 @@ void app_voice_assistant(void *param)
     va_config_t cfg = {
         .ws_uri    = CONFIG_VA_WS_URI,  /* Kconfig 中配置的语音服务器地址 */
         .wake_word = NULL,              /* NULL = 使用默认唤醒词 "nihaoxiaozhi" */
-        .det_mode  = 90,                /* 唤醒灵敏度: 80(灵敏) / 90(均衡) / 95(严格) */
+        .det_mode  = 0,                 /* 0 代表 DET_MODE_90，避免唤醒阈值过高导致无法触发 */
     };
 
     va_callbacks_t cbs = {
@@ -169,8 +238,8 @@ void app_voice_assistant_init(void)
     static StaticTask_t task_tcb;
     static StackType_t task_stack[1024 * 8];
 
-    TaskHandle_t h = xTaskCreateStatic(app_voice_assistant, "voice", 1024 * 8,
-                                       NULL, 5, task_stack, &task_tcb);
+    TaskHandle_t h = xTaskCreateStaticPinnedToCore(app_voice_assistant, "voice", 1024 * 8,
+                                                 NULL, 5, task_stack, &task_tcb, 1);
     if (!h) {
         ESP_LOGE(TAG, "Failed to create voice assistant task");
     }

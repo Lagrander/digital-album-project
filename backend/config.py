@@ -1,6 +1,6 @@
 # ============================================================
 # 云端电子相册 — 配置文件
-# 基于 InkTime config 改造，适配 800×480 彩色 LCD + 云端存储
+# 适配 800×480 彩色 LCD + 云端存储
 # ============================================================
 
 # --- 照片存储路径（云端/本地/NAS 挂载目录） ---
@@ -15,13 +15,21 @@ UPLOAD_DB_PATH = "./upload.db"
 # --- 上传照片原图存储目录 ---
 UPLOAD_DIR = "./upload_photos"
 
-# VLM 分析配置（与 InkTime 完全一致）
+# --- 已迁移至本地模型 (Ollama + whisper + edge-tts) ---
+# 不再需要阿里云 API 密钥
+
+
 
 API_CHANNELS = [
+    # {
+    #     "api_url":    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    #     "api_key":    DASHSCOPE_API_KEY,
+    #     "model_name": "qwen-vl-max",
+    # },
     {
-        "api_url":    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        "api_key":    "sk-97cae9f2a0a54f83bce650d520988fbe",
-        "model_name": "qwen-vl-max",
+        "api_url":    "http://127.0.0.1:11434/v1/chat/completions",
+        "api_key":    "ollama",
+        "model_name": "qwen2.5:0.5b",
     },
 ]
 
@@ -63,5 +71,5 @@ TEXT_AREA_HEIGHT = 0
 # 百度网盘云端同步与 AI 处理配置
 BAIDU_ACCESS_TOKEN = "121.0eca91a12139d39d3fdf9576e2ee45ab.Y5pqA7y-bOxRWKte6SeDa9hzYPSV7GFiX9pc1z-.VOt8LQ"
 BAIDU_REMOTE_DIR = "/apps/digital_album"
-OLLAMA_MODEL = "llava:7b"
+OLLAMA_MODEL = "qwen2.5:0.5b"
 

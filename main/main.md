@@ -49,16 +49,25 @@ graph TD
 根据 `backend_interface.md` 规范，硬件共包含 I2S 音频功放（MAX98357A）、I2C 控制扩展板（PCF8574）以及 HE30 三路香薰雾化控制三大物理部分，所有管脚硬件调试和接线参数规定如下：
 
 ### 1. I2S 功放与音频接口接线
-相册采用 **MAX98357A** I2S 无滤波 D类功放模块，用于高品质启动音效及 TTS 语音的高声级播放：
+相册采用 **MAX98357A** I2S 无滤波 D类功放模块，用于高品质启动音效及 TTS 语音的高声级播放；配合 **INMP441** 数字 MEMS 麦克风实现语音唤醒与录音功能：
 
 | MAX98357A 功放引脚 | ESP32-S3 物理引脚 | 说明 |
 | :--- | :--- | :--- |
 | **VIN** | 5V | 功放驱动主电源供电 |
 | **GND** | GND | 与 ESP32-S3 芯片主板共地 |
-| **BCLK** | **GPIO 4** | I2S 位时钟信号线 (Bit Clock) |
-| **LRC / WS** | **GPIO 5** | I2S 左右声道选择信号线 (Word Select) |
-| **DIN** | **GPIO 6** | I2S 音频数据输入线，接芯片 I2S0 DOUT |
+| **BCLK** | **GPIO 12** | I2S 位时钟信号线 (Bit Clock)，与麦克风共享 |
+| **LRC / WS** | **GPIO 11** | I2S 左右声道选择信号线 (Word Select)，与麦克风共享 |
+| **DIN** | **GPIO 13** | I2S 音频数据输入线，接芯片 I2S0 DOUT |
 | **SPK+ / SPK-** | 扬声器正负极 | 物理输出对接 `8欧/1.5W` 的腔体小喇叭 |
+
+| INMP441 麦克风引脚 | ESP32-S3 物理引脚 | 说明 |
+| :--- | :--- | :--- |
+| **VDD** | 3.3V | INMP441 供电 |
+| **GND** | GND | 与 ESP32-S3 芯片主板共地 |
+| **WS / LRCLK** | **GPIO 11** | I2S Word Select / LRCLK |
+| **SCK / BCLK** | **GPIO 12** | I2S Bit Clock |
+| **SD / DOUT** | **GPIO 6** | I2S 串行数据输出，接 ESP32 I2S DIN |
+| **L/R** | GND | 左声道模式 |
 
 ### 2. PCF8574 I2C 扩展低速 IO 接线
 相册的外设控制板通过 **PCF8574** 低速扩展模块级联，将极度紧张的 ESP32 GPIO 引脚通过 I2C 扩展成 8 路可用 IO：

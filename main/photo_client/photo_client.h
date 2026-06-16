@@ -70,6 +70,7 @@ typedef struct {
     char target_id[64];
     int channel;
     int state;
+    char text[256];
 } device_command_t;
 
 /**
@@ -87,6 +88,12 @@ esp_err_t photo_client_fetch_command(device_command_t *cmd);
  */
 void photo_client_set_server_url(const char *url);
 const char *photo_client_get_server_url(void);
+
+/**
+ * 设置和获取相册过滤标签
+ */
+void photo_client_set_tag(const char *tag);
+const char *photo_client_get_tag(void);
 
 #ifdef __cplusplus
 }

@@ -13,17 +13,12 @@ extern "C" {
 #define I2S_MIC_INPUT_SAMPLE_RATE_HZ 16000
 #define I2S_MIC_INPUT_BITS_PER_SAMPLE 16
 
-#ifndef MIC_I2S_BCLK_GPIO
-#define MIC_I2S_BCLK_GPIO GPIO_NUM_12
-#endif
-
-#ifndef MIC_I2S_WS_GPIO
-#define MIC_I2S_WS_GPIO GPIO_NUM_11
-#endif
-
-#ifndef MIC_I2S_DIN_GPIO
-#define MIC_I2S_DIN_GPIO GPIO_NUM_13
-#endif
+/* ── 麦克风 I2S 引脚 ──────────────────────────────────────────
+ * 引脚由 Kconfig (Voice Assistant 菜单) 注入
+ */
+#define MIC_I2S_BCLK_GPIO CONFIG_VA_MIC_SCK_PIN
+#define MIC_I2S_WS_GPIO   CONFIG_VA_MIC_WS_PIN
+#define MIC_I2S_DIN_GPIO  CONFIG_VA_MIC_SD_PIN
 
 esp_err_t i2s_mic_input_init(void);
 esp_err_t i2s_mic_input_read(int16_t *buffer,

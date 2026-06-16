@@ -27,6 +27,7 @@ idf_component_register(
         "./voice_assistant/src/ws_voice.c"
         "./voice_assistant/src/voice_assistant.c"
         "./voice_assistant/src/voice_assistant_task.c"
+        "./voice_assistant/src/stream_player.c"
         "./app/app_event.c"
     INCLUDE_DIRS
         "."
@@ -55,6 +56,7 @@ idf_component_register(
         esp-sr
         esp_websocket_client
         spiffs
+        esp_ringbuf
 )
 
 # ---- 嵌入占位图片 ----

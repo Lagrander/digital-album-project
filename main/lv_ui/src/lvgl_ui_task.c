@@ -16,6 +16,14 @@
 #include "waveshare_rgb_lcd_port.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
+#include <string.h>
+#include "../../voice_assistant/include/stream_player.h"
+#include "../../peripherals/include/peripherals_task.h"
+
+void ui_resume_playlist(void);
+static bool g_sleep_mode = false;
+static volatile bool g_rotate_requested = false;
 
 void ui_voice_next_photo(void);
 
@@ -106,10 +114,37 @@ void fetch_and_display_photo(int idx) {
  */
 static void upload_check_task(void *param) {
   (void)param;
-  ESP_LOGI(TAG, "Background upload check task started (Core 0)");
+  ESP_LOGI(TAG, "Unified Network Daemon started (Core 0)");
 
+  ESP_LOGI(TAG, "Waiting for network connection in background task...");
+  int wait_net = 0;
+  while (!net_mgr_is_connected() && wait_net < 150) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    wait_net++;
+  }
+
+  if (net_mgr_is_connected()) {
+    ESP_LOGI(TAG, "Fetching today's photos...");
+    photo_client_fetch_today(g_photos, &g_photo_count);
+    ESP_LOGI(TAG, "Photo count: %d", g_photo_count);
+    if (g_photo_count > 0) {
+      fetch_and_display_photo(0);
+    } else {
+      if (lvgl_port_lock(-1)) {
+        ui_show_placeholder();
+        lvgl_port_unlock();
+      }
+    }
+  } else {
+    ESP_LOGW(TAG, "Not connected after timeout, skipping photo fetch");
+    if (lvgl_port_lock(-1)) {
+      ui_show_placeholder();
+      lvgl_port_unlock();
+    }
+  }
+
+  uint32_t loop_cnt = 0;
   while (1) {
-    // 5 秒后台静默睡眠（非阻塞，不消耗任何 CPU）
     vTaskDelay(pdMS_TO_TICKS(5 * 1000));
 
     if (!net_mgr_is_connected()) {
@@ -140,6 +175,10 @@ static void upload_check_task(void *param) {
         ui_voice_next_photo();
       } else if (strcmp(cmd.cmd, "toggle_aroma") == 0) {
         aroma_set(cmd.channel, cmd.state);
+      } else if (strcmp(cmd.cmd, "simulate_text") == 0) {
+        char ws_json[384];
+        snprintf(ws_json, sizeof(ws_json), "{\"event\":\"simulate_text\",\"text\":\"%s\"}", cmd.text);
+        voice_assistant_send_text(ws_json);
       }
     }
 
@@ -179,6 +218,7 @@ static void upload_check_task(void *param) {
         }
       }
     }
+    loop_cnt++;
   }
 }
 
@@ -282,85 +322,7 @@ static void sensor_update_timer(lv_timer_t *t) {
  */
 static void time_update_timer(lv_timer_t *t) { ui_update_time(); }
 
-/**
- * @brief UI 任务主逻辑 (Core 1)
- *
- * 负责 LCD 初始化、LVGL 框架初始化，并进入空闲循环。
- *
- * @param param 任务参数
- * @return void
- */
-void app_ui(void *param) {
-  (void)param;
-
-  waveshare_esp32_s3_rgb_lcd_init();
-  ESP_LOGI(TAG, "LCD initialized, backlight kept ON for seamless transition "
-                "from ROM white screen");
-
-  ESP_LOGI(TAG, "Display in portrait mode (driver rotation)");
-
-  // 2. 初始化 UI 框架（持有 LVGL 锁）
-  if (lvgl_port_lock(-1)) {
-    ui_main_init();
-    ui_update_time(); // 初始化时先刷新一次时间
-    lvgl_port_unlock();
-  }
-
-  ESP_LOGI(TAG, "First frame (White LOADING) rendered seamlessly.");
-
-  // 3. 等待网络成功建连
-  ESP_LOGI(TAG, "Waiting for network connection...");
-  int wait_net = 0;
-  while (!net_mgr_is_connected() && wait_net < 150) {
-    vTaskDelay(pdMS_TO_TICKS(100));
-    wait_net++;
-  }
-
-  // 3.5 获取当日照片列表并显示
-  //    fetch_and_display_photo 内部调用 LVGL API，必须持锁
-  if (net_mgr_is_connected()) {
-    ESP_LOGI(TAG, "Fetching today's photos...");
-    photo_client_fetch_today(g_photos, &g_photo_count);
-    ESP_LOGI(TAG, "Photo count: %d", g_photo_count);
-    if (g_photo_count > 0) {
-      fetch_and_display_photo(0); /* 内部已持 lvgl_port_lock */
-    } else {
-      if (lvgl_port_lock(-1)) {
-        ui_show_placeholder();
-        lvgl_port_unlock();
-      }
-    }
-  } else {
-    ESP_LOGW(TAG, "Not connected after timeout, skipping photo fetch");
-    if (lvgl_port_lock(-1)) {
-      ui_show_placeholder();
-      lvgl_port_unlock();
-    }
-  }
-
-  // 3.5 创建 pending 锁
-  g_pending_mutex = xSemaphoreCreateMutex();
-
-  // 4. LVGL 定时器（lv_timer_create 必须在持锁状态下调用）
-  if (lvgl_port_lock(-1)) {
-    lv_timer_create(photo_rotate_timer, 60 * 60 * 1000, NULL);
-    lv_timer_create(sensor_update_timer, 5000, NULL);
-    lv_timer_create(time_update_timer, 1000, NULL);
-    lv_timer_create(upload_dispatch_timer_cb, 100,
-                    NULL); // 100ms 巡检异步上传队列
-    lvgl_port_unlock();
-  }
-
-  // 4.5 启动后台网络轮询任务 (部署于 Core 0，隔离于 Core 1
-  // 渲染任务，防止看门狗超时)
-  xTaskCreatePinnedToCore(upload_check_task, "upload_chk", 1024 * 4, NULL, 1,
-                          NULL, 0);
-
-  // 5. 空闲循环
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
-}
+// --- app_ui dead thread has been removed. Initialization moved to app_ui_init. ---
 
 /**
  * @brief 语音助手触发切换下一张照片
@@ -416,21 +378,164 @@ void ui_voice_on_state(int state) {
   /* 后续可扩展：在屏幕上显示语音状态指示器 */
 }
 
+/* ── 背光亮度语音控制 ──────────────────────────────────────────── */
+
+static uint8_t g_brightness = 100;
+
+void ui_voice_brightness_up(void) {
+  if (g_brightness < 100) {
+    g_brightness = (g_brightness + 10 > 100) ? 100 : g_brightness + 10;
+  }
+  ESP_LOGI(TAG, "Brightness → %d%%", g_brightness);
+  waveshare_rgb_lcd_bl_set_brightness(g_brightness);
+}
+
+void ui_voice_brightness_down(void) {
+  if (g_brightness > 0) {
+    g_brightness = (g_brightness < 10) ? 0 : g_brightness - 10;
+  }
+  ESP_LOGI(TAG, "Brightness → %d%%", g_brightness);
+  waveshare_rgb_lcd_bl_set_brightness(g_brightness);
+}
+
+/* ── 休眠模式 ──────────────────────────────────────────────────── */
+
+void ui_voice_sleep(void) {
+  g_sleep_mode = true;
+  ESP_LOGI(TAG, "Entering sleep mode: backlight off, audio stop, mist off");
+  waveshare_rgb_lcd_bl_set_brightness(0);
+  stream_player_stop();
+  peripherals_mist_off();
+  /* 暂停照片自动轮播（轮播定时器检查此标志位） */
+}
+
+void ui_voice_wake_from_sleep(void) {
+  if (!g_sleep_mode) return;
+  g_sleep_mode = false;
+  ESP_LOGI(TAG, "Waking from sleep mode");
+  waveshare_rgb_lcd_bl_set_brightness(g_brightness);
+  /* 恢复自动轮播（轮播定时器重新激活） */
+}
+
+bool ui_is_sleep_mode(void) {
+  return g_sleep_mode;
+}
+
+/* ── 云端 show_specific / resume_playlist ──────────────────────── */
+
+static lv_timer_t *g_hold_timer = NULL;
+static bool g_hold_until_midnight = false;
+
+static void hold_midnight_check(lv_timer_t *t) {
+  time_t now;
+  time(&now);
+  struct tm *lt = localtime(&now);
+  if (lt->tm_hour == 0 && lt->tm_min == 0) {
+    ESP_LOGI(TAG, "Midnight reached — auto resume_playlist");
+    ui_resume_playlist();
+  }
+}
+
+void ui_show_photo_from_url(const char *url, const char *hold_mode) {
+  if (!url) return;
+  ESP_LOGI(TAG, "show_specific: %s hold=%s", url, hold_mode);
+
+  // 通过 photo_client 从 Flask 代理下载 RGB565 并显示
+  // 若 URL 是 /api/photo/<id>.jpg 格式，提取 ID 并下载 RGB565
+  // MVP: 尝试作为 photo ID 解析
+  const char *id_start = strstr(url, "/api/photo/");
+  if (id_start) {
+    id_start += 11; // skip "/api/photo/"
+    char photo_id[128];
+    size_t len = strcspn(id_start, ".?/");
+    if (len < sizeof(photo_id)) {
+      memcpy(photo_id, id_start, len);
+      photo_id[len] = '\0';
+      ESP_LOGI(TAG, "Resolved photo ID: %s", photo_id);
+      uint8_t *buf = NULL;
+      size_t buf_len = 0;
+      if (photo_client_download_rgb565(photo_id, &buf, &buf_len) == ESP_OK) {
+        if (lvgl_port_lock(500)) {
+          ui_set_photo_data(buf, buf_len, NULL, NULL, NULL);
+          lvgl_port_unlock();
+        }
+      }
+    }
+  }
+
+  // Hold mode 定时器
+  if (g_hold_timer) {
+    lv_timer_del(g_hold_timer);
+    g_hold_timer = NULL;
+  }
+  g_hold_until_midnight = (hold_mode && strcmp(hold_mode, "until_midnight") == 0);
+  if (g_hold_until_midnight) {
+    g_hold_timer = lv_timer_create(hold_midnight_check, 60000, NULL);
+    ESP_LOGI(TAG, "Hold until midnight timer started");
+  }
+}
+
+void ui_resume_playlist(void) {
+  ESP_LOGI(TAG, "resume_playlist");
+  if (g_hold_timer) {
+    lv_timer_del(g_hold_timer);
+    g_hold_timer = NULL;
+  }
+  g_hold_until_midnight = false;
+  // 停止可能正在播放的伴随音频
+  stream_player_stop();
+  // 恢复正常的 60 分钟自动轮播
+  g_rotate_requested = true;
+}
+
+void ui_trigger_album_filter(const char *filter) {
+  photo_client_set_tag(filter);
+  g_photo_count = 0;
+  ESP_LOGI(TAG, "UI Triggered: Refresh photos with filter: %s", filter);
+  photo_client_fetch_today(g_photos, &g_photo_count);
+  if (g_photo_count > 0) {
+    g_current_idx = 0;
+    fetch_and_display_photo(0);
+  } else {
+    if (lvgl_port_lock(-1)) {
+      ui_show_placeholder();
+      lvgl_port_unlock();
+    }
+  }
+}
+
 /**
- * @brief 创建 UI 任务
+ * @brief 初始化 UI 环境
  *
- * 静态分配任务栈并拉起主 UI 线程。
+ * 直接同步初始化 LCD 及 LVGL，拉起相关定时器与统一网络守护进程。
  * @return void
  */
-
 void app_ui_init(void) {
-  static StaticTask_t task_tcb;
-  static StackType_t task_stack[1024 * 6];
+  waveshare_esp32_s3_rgb_lcd_init();
+  ESP_LOGI(TAG, "LCD initialized, backlight kept ON for seamless transition from ROM white screen");
+  ESP_LOGI(TAG, "Display in portrait mode (driver rotation)");
 
-  TaskHandle_t task_ui = xTaskCreateStatic(app_ui, "ui_task", 1024 * 6, NULL, 1,
-                                           task_stack, &task_tcb);
-
-  if (task_ui == NULL) {
-    printf("Failed to create UI task\n");
+  // 2. 初始化 UI 框架（持有 LVGL 锁）
+  if (lvgl_port_lock(-1)) {
+    ui_main_init();
+    ui_update_time(); // 初始化时先刷新一次时间
+    lvgl_port_unlock();
   }
+
+  ESP_LOGI(TAG, "First frame (White LOADING) rendered seamlessly.");
+
+  g_pending_mutex = xSemaphoreCreateMutex();
+
+  // 3. LVGL 定时器（lv_timer_create 必须在持锁状态下调用）
+  if (lvgl_port_lock(-1)) {
+    lv_timer_create(photo_rotate_timer, 60 * 60 * 1000, NULL);
+    lv_timer_create(sensor_update_timer, 5000, NULL);
+    lv_timer_create(time_update_timer, 1000, NULL);
+    lv_timer_create(upload_dispatch_timer_cb, 100, NULL); // 100ms 巡检异步上传队列
+    lvgl_port_unlock();
+  }
+
+  // 4. 启动统一的后台网络守护任务 (Network Daemon, 部署于 Core 0)
+  ESP_LOGI(TAG, "Starting unified async network fetch task...");
+  xTaskCreatePinnedToCore(upload_check_task, "net_daemon", 4096, NULL, 1, NULL, 0);
 }

@@ -18,6 +18,7 @@
 #include "audio_buf.h"
 #include "voice_io.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -43,27 +44,17 @@ esp_err_t audio_buf_init(audio_buf_t *ab)
     ab->rec_buf_samples  = ab->sample_rate * ab->record_dur_sec;
     ab->resp_buf_samples = ab->sample_rate * ab->response_dur_sec;
 
-    /* 分配录音缓冲区 */
-    ab->rec_buf = malloc(ab->rec_buf_samples * sizeof(int16_t));
-    if (!ab->rec_buf) {
-        ESP_LOGE(TAG, "rec buffer alloc fail (%zu bytes)", ab->rec_buf_samples * sizeof(int16_t));
-        return ESP_ERR_NO_MEM;
-    }
+    /* 分配录音缓冲区（已废弃，现在使用流式边收边发，仅保留时长统计计数，释放 320KB PSRAM） */
+    ab->rec_buf = NULL;
 
-    /* 分配响应缓冲区（calloc 保证初始为静音） */
-    ab->resp_buf = calloc(ab->resp_buf_samples, sizeof(int16_t));
-    if (!ab->resp_buf) {
-        ESP_LOGE(TAG, "resp buffer alloc fail");
-        free(ab->rec_buf); ab->rec_buf = NULL;
-        return ESP_ERR_NO_MEM;
-    }
+    /* 分配响应缓冲区（废弃，已改用流式边收边播，释放 1MB PSRAM） */
+    ab->resp_buf = NULL;
 
     /* 分配流式环形缓冲区 */
-    ab->stream_buf = malloc(AUDIO_BUF_STREAMING_SIZE);
+    ab->stream_buf = heap_caps_malloc(AUDIO_BUF_STREAMING_SIZE, MALLOC_CAP_SPIRAM);
     if (!ab->stream_buf) {
         ESP_LOGE(TAG, "stream buffer alloc fail");
         free(ab->rec_buf);  ab->rec_buf  = NULL;
-        free(ab->resp_buf); ab->resp_buf = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -104,12 +95,11 @@ void audio_buf_record_stop(audio_buf_t *ab)  { ab->recording = false; }
  */
 bool audio_buf_record_feed(audio_buf_t *ab, const int16_t *data, size_t samples)
 {
-    if (!ab->recording || !ab->rec_buf) return false;
+    if (!ab->recording) return false;
     if (ab->rec_len + samples > ab->rec_buf_samples) {
-        ESP_LOGW(TAG, "rec buffer full");
+        ESP_LOGW(TAG, "rec buffer virtual space full (timeout)");
         return false;
     }
-    memcpy(&ab->rec_buf[ab->rec_len], data, samples * sizeof(int16_t));
     ab->rec_len += samples;
     return true;
 }
@@ -172,6 +162,7 @@ esp_err_t audio_buf_resp_play(audio_buf_t *ab)
 void audio_buf_stream_begin(audio_buf_t *ab)
 {
     ab->streaming    = true;
+    ab->is_playing  = true;
     ab->stream_write = 0;
     ab->stream_read  = 0;
     if (ab->stream_buf) memset(ab->stream_buf, 0, AUDIO_BUF_STREAMING_SIZE);
@@ -231,20 +222,27 @@ static void stream_read_chunk(audio_buf_t *ab, uint8_t *out, size_t len)
 bool audio_buf_stream_feed(audio_buf_t *ab, const uint8_t *data, size_t len)
 {
     if (!ab->streaming || !ab->stream_buf || !data) return false;
-    if (len > stream_space(ab)) {
-        ESP_LOGW(TAG, "stream buffer full");
+
+    size_t space = stream_space(ab);
+    if (space == 0) {
+        ESP_LOGW(TAG, "stream buffer completely full");
         return false;
+    }
+
+    size_t to_write = (len > space) ? space : len;
+    if (to_write < len) {
+        ESP_LOGW(TAG, "stream buffer full, dropping %zu/%zu bytes", len - to_write, len);
     }
 
     /* 写入数据（处理绕回） */
     size_t to_end = AUDIO_BUF_STREAMING_SIZE - ab->stream_write;
-    if (len <= to_end) {
-        memcpy(ab->stream_buf + ab->stream_write, data, len);
-        ab->stream_write += len;
+    if (to_write <= to_end) {
+        memcpy(ab->stream_buf + ab->stream_write, data, to_write);
+        ab->stream_write += to_write;
     } else {
         memcpy(ab->stream_buf + ab->stream_write, data, to_end);
-        memcpy(ab->stream_buf, data + to_end, len - to_end);
-        ab->stream_write = len - to_end;
+        memcpy(ab->stream_buf, data + to_end, to_write - to_end);
+        ab->stream_write = to_write - to_end;
     }
     if (ab->stream_write >= AUDIO_BUF_STREAMING_SIZE)
         ab->stream_write = 0;
@@ -252,8 +250,14 @@ bool audio_buf_stream_feed(audio_buf_t *ab, const uint8_t *data, size_t len)
     /* 每次满了 200ms 就播放一块 */
     while (stream_avail(ab) >= AUDIO_BUF_STREAMING_CHUNK) {
         uint8_t chunk[AUDIO_BUF_STREAMING_CHUNK];
+        size_t prev_read = ab->stream_read; // 播放失败时需要回滚
         stream_read_chunk(ab, chunk, AUDIO_BUF_STREAMING_CHUNK);
-        if (voice_io_spk_play_stream(chunk, AUDIO_BUF_STREAMING_CHUNK) != ESP_OK) break;
+        if (voice_io_spk_play_stream(chunk, AUDIO_BUF_STREAMING_CHUNK) != ESP_OK) {
+            // I2S RingBuffer 满了，回滚读指针并等待后重试
+            ab->stream_read = prev_read;
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
     }
     return true;
 }
@@ -276,6 +280,7 @@ void audio_buf_stream_finish(audio_buf_t *ab)
         }
     }
     ab->streaming    = false;
+    ab->is_playing  = false;
     ab->stream_write = 0;
     ab->stream_read  = 0;
 }

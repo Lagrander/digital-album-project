@@ -30,4 +30,7 @@ void lv_va_wake_detect_init(void);
 /* 发送文本到云端并获取回复（占位） */
 void lv_va_send_text_to_cloud(const char *text);
 
+/* 显示真实对话文本（用户语音识别结果 + AI 回复） */
+void lv_va_show_text(const char *user_text, const char *ai_text, const char *emotion);
+
 #endif // LV_VOICE_ASSISTANT_H

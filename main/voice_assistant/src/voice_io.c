@@ -1,388 +1,915 @@
 /*
- * voice_io.c — I2S 音频驱动实现
- *
- * INMP441 麦克风 (I2S_NUM_0 RX) + MAX98357A 扬声器 (I2S_NUM_1 TX)。
- * 使用 ESP-IDF 5.x 标准模式 I2S API，GPIO 引脚来自 Kconfig。
- *
- * 移植自 xiaozhi-replica bsp_board.cc（C++ 类成员 → C 静态文件变量）。
- *
- * 关键设计:
- *   - 麦克风: 飞利浦标准 I2S，24 位数据左对齐在 32 位槽 → 读后限幅到 16 位
- *   - 扬声器: MAX98357A SD_MODE 引脚控制功放开关，静音时关断省电
- *   - 流式播放: voice_io_spk_play_stream() 保持 I2S 通道开着连续写入
- *   - 一次性播放: voice_io_spk_play() 写完后自动停 I2S + 关功放
+
+ * voice_io.c — I2S 音频驱动实现（48kHz 全双工 + PSRAM + FIR降采样重构版）
+
  */
 
 #include "voice_io.h"
+
 #include "driver/gpio.h"
+
 #include "driver/i2s_std.h"
+
+#include "dsps_fir.h"
+
 #include "esp_check.h"
+
+#include "esp_dsp.h"
+
+#include "esp_heap_caps.h"
+
 #include "esp_log.h"
+
 #include "freertos/FreeRTOS.h"
+
+#include "freertos/idf_additions.h"
+
+#include "freertos/ringbuf.h"
+
 #include "freertos/task.h"
+
+#include <math.h>
+
 #include <string.h>
 
+#ifndef M_PI
+
+#define M_PI 3.14159265358979323846
+
+#endif
 
 static const char *TAG = "voice_io";
 
-/* ── 内部状态（文件级全局，单实例）────────────────────────── */
+/* ── 内部状态与结构 ────────────────────────── */
 
 static i2s_chan_handle_t rx_chan = NULL;
+
 static i2s_chan_handle_t tx_chan = NULL;
-static bool tx_enabled = false;
-static int g_tx_channel_cnt = 1;
 
-#define MIC_I2S_NUM I2S_NUM_0 /* 麦克风使用 I2S 外设 0         */
-#define SPK_I2S_NUM I2S_NUM_1 /* 扬声器使用 I2S 外设 1         */
+static bool s_i2s_shared_initialized = false;
 
-/* ── 麦克风实现 ─────────────────────────────────────────────── */
+static bool s_amp_enabled = false;
 
-/*
- * 初始化 INMP441 麦克风 I2S 接收通道。
- *
- * 流程:
- *   1. 创建 I2S 通道（ESP32-S3 为主机，INMP441 为从机）
- *   2. 配置飞利浦标准时序 + 单声道 + 左声道槽位
- *   3. 使能通道后丢弃前 3 次读数（上电毛刺）
- */
-esp_err_t voice_io_mic_init(uint32_t sample_rate, int channel,
-                            int bits_per_sample) {
-  esp_err_t ret;
+// PSRAM 缓冲池
 
-  /* 创建 I2S RX 通道 */
-  i2s_chan_config_t chan_cfg =
-      I2S_CHANNEL_DEFAULT_CONFIG(MIC_I2S_NUM, I2S_ROLE_MASTER);
-  ret = i2s_new_channel(&chan_cfg, NULL, &rx_chan);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "I2S RX channel create failed: %s", esp_err_to_name(ret));
-    return ret;
-  }
+static RingbufHandle_t tx_ringbuf = NULL;
 
-  /* 位宽: 16 或 32 */
-  i2s_data_bit_width_t bw = (bits_per_sample == 32) ? I2S_DATA_BIT_WIDTH_32BIT
-                                                    : I2S_DATA_BIT_WIDTH_16BIT;
+static RingbufHandle_t rx_ringbuf = NULL;
 
-  /* 配置飞利浦标准模式 */
-  i2s_std_config_t std_cfg = {
-      .clk_cfg =
-          {
-              .sample_rate_hz = sample_rate,
-              .clk_src = I2S_CLK_SRC_DEFAULT,
-              .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-          },
-      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bw, I2S_SLOT_MODE_MONO),
-      .gpio_cfg =
-          {
-              .mclk = I2S_GPIO_UNUSED,
-              .bclk = CONFIG_VA_MIC_SCK_PIN,
-              .ws = CONFIG_VA_MIC_WS_PIN,
-              .dout = I2S_GPIO_UNUSED,
-              .din = CONFIG_VA_MIC_SD_PIN,
-              .invert_flags =
-                  {
-                      .mclk_inv = false,
-                      .bclk_inv = false,
-                      .ws_inv = false,
-                  },
-          },
-  };
-  std_cfg.slot_cfg.slot_mode = I2S_SLOT_MODE_MONO;
-  std_cfg.slot_cfg.slot_mask =
-      I2S_STD_SLOT_LEFT; /* INMP441 仅在左声道输出数据 */
+static uint8_t s_spk_volume =
+    10; // 全局硬件音量 (0~100)，默认 10% 防止瞬间大电流触发功放断电保护
 
-  ret = i2s_channel_init_std_mode(rx_chan, &std_cfg);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "RX std init fail");
-    return ret;
-  }
+void voice_io_set_spk_volume(uint8_t vol) {
 
-  ret = i2s_channel_enable(rx_chan);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "RX enable fail");
-    return ret;
-  }
+  if (vol > 100)
+    vol = 100;
 
-  /* 丢弃上电初期的无效采样 */
-  uint8_t *discard = malloc(8192);
-  if (discard) {
-    size_t n;
-    for (int i = 0; i < 3; i++) {
-      i2s_channel_read(rx_chan, discard, 8192, &n, pdMS_TO_TICKS(100));
-      vTaskDelay(pdMS_TO_TICKS(10));
+  s_spk_volume = vol;
+
+  ESP_LOGI(TAG, "Speaker volume set to %d%%", vol);
+}
+
+uint8_t voice_io_get_spk_volume(void) { return s_spk_volume; }
+
+// FIR 滤波器所需资源
+
+// ESP-S3 DSP库的汇编指令要求滤波器阶数必须 be 4 的倍数，所以设为 32
+
+// 并且系数和延迟线数组必须按 16 字节对齐
+
+#define FIR_TAP_NUM 32
+
+static __attribute__((aligned(16))) float fir_coeffs[FIR_TAP_NUM];
+
+static __attribute__((aligned(16))) float fir_delayline[FIR_TAP_NUM];
+
+static fir_f32_t fir_decim_obj;
+
+/* ── FIR 滤波器初始化 (48kHz -> 16kHz) ──────── */
+
+static void init_fir_decim(void) {
+
+  float wc = M_PI / 3.0f; // 48kHz 到 16kHz 抽取，截止频率 8kHz (即 1/3 Nyquist)
+
+  float sum = 0;
+
+  float center = (FIR_TAP_NUM - 1) / 2.0f;
+
+  for (int i = 0; i < FIR_TAP_NUM; i++) {
+
+    float x = i - center;
+
+    if (x == 0.0f) {
+
+      fir_coeffs[i] = wc / M_PI;
+
+    } else {
+
+      fir_coeffs[i] = sinf(wc * x) / (M_PI * x);
     }
-    free(discard);
+
+    // 应用 Hanning 窗抗振铃
+
+    fir_coeffs[i] *= 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FIR_TAP_NUM - 1)));
+
+    sum += fir_coeffs[i];
   }
 
-  ESP_LOGI(TAG, "Mic I2S RX ready  rate=%lu ch=%d bits=%d", sample_rate,
-           channel, bits_per_sample);
-  return ESP_OK;
-}
+  // 归一化
 
-/*
- * 从麦克风读取一帧音频数据（阻塞）。
- *
- * INMP441 输出 24 位数据，左对齐在 32 位 I2S 槽位中。
- * is_raw=false 时对每个样本限幅到 int16_t 范围 [-32768, 32767]。
- * WakeNet / MultiNet 可直接使用限幅后的 16 位数据。
- */
-esp_err_t voice_io_mic_read(bool is_raw, int16_t *buffer, int len) {
-  size_t bytes_read = 0;
-  esp_err_t ret =
-      i2s_channel_read(rx_chan, buffer, len, &bytes_read, portMAX_DELAY);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "I2S read fail: %s", esp_err_to_name(ret));
-    return ret;
-  }
-  if (bytes_read != (size_t)len) {
-    ESP_LOGW(TAG, "Partial read: %d / %d", (int)bytes_read, len);
-  }
-  if (!is_raw) {
-    /* 24 位 → 16 位限幅 */
-    int samples = len / (int)sizeof(int16_t);
-    for (int i = 0; i < samples; i++) {
-      int32_t s = (int32_t)buffer[i];
-      if (s > 32767)
-        s = 32767;
-      if (s < -32768)
-        s = -32768;
-      buffer[i] = (int16_t)s;
-    }
-  }
-  return ESP_OK;
-}
+  for (int i = 0; i < FIR_TAP_NUM; i++) {
 
-/*
- * 返回麦克风声道数。INMP441 固定单声道输出。
- */
-int voice_io_mic_channel(void) { return 1; }
-
-/* ── 扬声器实现 ─────────────────────────────────────────────── */
-
-/*
- * 初始化 MAX98357A 扬声器 I2S 发送通道。
- *
- * 流程:
- *   1. 配置 SD_MODE 引脚为推挽输出，拉高使能功放
- *   2. 创建 I2S TX 通道
- *   3. 配置飞利浦标准时序 + 单/双声道
- *   4. 使能通道，设为 tx_enabled = true
- */
-esp_err_t voice_io_spk_init(uint32_t sample_rate, int channel,
-                            int bits_per_sample) {
-  esp_err_t ret;
-  g_tx_channel_cnt = channel;
-
-  /* MAX98357A SD_MODE: 只有当引脚有效时才进行 GPIO 控制 */
-#if CONFIG_VA_SPK_SD_PIN >= 0
-  gpio_config_t io = {
-      .pin_bit_mask = (1ULL << CONFIG_VA_SPK_SD_PIN),
-      .mode = GPIO_MODE_OUTPUT,
-      .pull_up_en = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_DISABLE,
-      .intr_type = GPIO_INTR_DISABLE,
-  };
-  gpio_config(&io);
-  gpio_set_level(CONFIG_VA_SPK_SD_PIN, 1);
-#endif
-
-  /* 创建 I2S TX 通道 */
-  i2s_chan_config_t chan_cfg =
-      I2S_CHANNEL_DEFAULT_CONFIG(SPK_I2S_NUM, I2S_ROLE_MASTER);
-  ret = i2s_new_channel(&chan_cfg, &tx_chan, NULL);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "TX chan fail");
-    return ret;
+    fir_coeffs[i] /= sum;
   }
 
-  i2s_data_bit_width_t bw = (bits_per_sample == 32) ? I2S_DATA_BIT_WIDTH_32BIT
-                                                    : I2S_DATA_BIT_WIDTH_16BIT;
+  // 初始化 esp-dsp 汇编级抽取器，抽取比例 3
 
-  i2s_slot_mode_t sm =
-      (channel == 1) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
-  i2s_std_config_t std_cfg = {
-      .clk_cfg =
-          {
-              .sample_rate_hz = sample_rate,
-              .clk_src = I2S_CLK_SRC_DEFAULT,
-              .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-          },
-      // 强制底层总线为双声道(STEREO)模式
-      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bw, I2S_SLOT_MODE_STEREO),
-      .gpio_cfg =
-          {
-              .mclk = I2S_GPIO_UNUSED,
-              .bclk = CONFIG_VA_SPK_BCLK_PIN,
-              .ws = CONFIG_VA_SPK_LRCK_PIN,
-              .dout = CONFIG_VA_SPK_DIN_PIN,
-              .din = I2S_GPIO_UNUSED,
-              .invert_flags =
-                  {
-                      .mclk_inv = false,
-                      .bclk_inv = false,
-                      .ws_inv = false,
-                  },
-          },
-  };
-  // 强制激活双声道槽位，并且强制 ws_width 为 16 (保证绝对 50% 占空比)
-  std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
-  std_cfg.slot_cfg.ws_width = 16;
+  esp_err_t ret = dsps_fird_init_f32(&fir_decim_obj, fir_coeffs, fir_delayline,
 
-  ESP_LOGW(TAG, "================================================");
-  ESP_LOGW(TAG, "!! RUNNING NEW STEREO UPMIX CONFIGURATION !!");
-  ESP_LOGW(TAG, "================================================");
+                                     FIR_TAP_NUM, 3);
 
-  ret = i2s_channel_init_std_mode(tx_chan, &std_cfg);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "TX std init fail");
-    return ret;
-  }
-
-  ret = i2s_channel_enable(tx_chan);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "TX enable fail");
-    return ret;
-  }
-  tx_enabled = true;
-
-  ESP_LOGI(TAG, "Speaker I2S TX ready");
-  return ESP_OK;
-}
-
-/* ── 内部辅助函数 ───────────────────────────────────────────── */
-
-/*
- * 确保 I2S 发送通道已使能。
- * 若未使能: 重新拉高 SD_MODE → 使能通道 → 写入 256 字节静音预热。
- * 用于流式播放时首次写入前的懒初始化。
- */
-static esp_err_t ensure_tx_on(void) {
-  if (tx_enabled)
-    return ESP_OK;
-#if CONFIG_VA_SPK_SD_PIN >= 0
-  gpio_set_level(CONFIG_VA_SPK_SD_PIN, 1);
-#endif
-  vTaskDelay(pdMS_TO_TICKS(10));
-  esp_err_t ret = i2s_channel_enable(tx_chan);
   if (ret == ESP_OK) {
-    tx_enabled = true;
-    /* 写入一小段静音预热 DAC */
-    static uint8_t silence[256];
-    size_t n;
-    i2s_channel_write(tx_chan, silence, sizeof(silence), &n, pdMS_TO_TICKS(10));
-  }
-  return ret;
-}
 
-/*
- * 将数据完整写入 I2S 通道（阻塞，循环直到全部写完）。
- *
- * @param chan I2S 通道句柄
- * @param data 数据缓冲区
- * @param len  字节长度
- * @return ESP_OK 全部写入成功
- */
-static esp_err_t write_all(i2s_chan_handle_t chan, const uint8_t *data,
-                           size_t len) {
-  if (g_tx_channel_cnt == 1) {
-    /* 单声道转双声道 (16-bit PCM) */
-    size_t samples = len / 2; // 16-bit = 2 bytes per sample
-    size_t stereo_len = len * 2;
-    int16_t *stereo_buf = malloc(stereo_len);
-    if (!stereo_buf) {
-      ESP_LOGE(TAG, "Failed to allocate stereo buffer for upmixing");
-      return ESP_ERR_NO_MEM;
-    }
+    ESP_LOGI(TAG, "FIR decimation filter initialized.");
 
-    const int16_t *mono_buf = (const int16_t *)data;
-    for (size_t i = 0; i < samples; i++) {
-      stereo_buf[i * 2] = mono_buf[i];     // 左声道
-      stereo_buf[i * 2 + 1] = mono_buf[i]; // 右声道
-    }
-
-    size_t total = 0;
-    esp_err_t r = ESP_OK;
-    while (total < stereo_len) {
-      size_t n = 0;
-      r = i2s_channel_write(chan, (uint8_t *)stereo_buf + total,
-                            stereo_len - total, &n, portMAX_DELAY);
-      if (r != ESP_OK)
-        break;
-      total += n;
-    }
-    free(stereo_buf);
-    return r;
   } else {
-    /* 原样输出 (已经是双声道) */
-    size_t total = 0;
-    while (total < len) {
-      size_t n = 0;
-      esp_err_t r =
-          i2s_channel_write(chan, data + total, len - total, &n, portMAX_DELAY);
-      if (r != ESP_OK)
-        return r;
-      total += n;
+
+    ESP_LOGE(TAG, "FIR filter init failed: %s", esp_err_to_name(ret));
+  }
+}
+
+/* ── Audio Tasks ────────────────────────── */
+
+#define AUDIO_CHUNK_SAMPLES 480 // 48kHz 下的 10ms
+
+static void audio_rx_task(void *args) {
+
+  int32_t *raw_48k_buf =
+
+      heap_caps_aligned_alloc(16, AUDIO_CHUNK_SAMPLES * 2 * sizeof(int32_t),
+
+                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  float *pcm_48k_f =
+
+      heap_caps_aligned_alloc(16, AUDIO_CHUNK_SAMPLES * sizeof(float),
+
+                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  float *pcm_16k_f =
+
+      heap_caps_aligned_alloc(16, (AUDIO_CHUNK_SAMPLES / 3) * sizeof(float),
+
+                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  int16_t *pcm_16k_buf =
+
+      heap_caps_aligned_alloc(16, (AUDIO_CHUNK_SAMPLES / 3) * sizeof(int16_t),
+
+                              MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  if (!raw_48k_buf || !pcm_48k_f || !pcm_16k_f || !pcm_16k_buf) {
+
+    ESP_LOGE(TAG, "Failed to allocate aligned buffers for RX task");
+
+    vTaskDelete(NULL);
+
+    return;
+  }
+
+  while (1) {
+
+    size_t bytes_read = 0;
+
+    // 1. 从内部 SRAM 的 DMA 极速读取 48kHz 硬件流 (双通道大小)
+
+    esp_err_t ret = i2s_channel_read(rx_chan, raw_48k_buf,
+
+                                     AUDIO_CHUNK_SAMPLES * 2 * sizeof(int32_t),
+
+                                     &bytes_read, pdMS_TO_TICKS(50));
+
+    if (ret == ESP_OK &&
+        bytes_read == AUDIO_CHUNK_SAMPLES * 2 * sizeof(int32_t)) {
+
+      static int debug_cnt = 0;
+      long long l_sum = 0, r_sum = 0;
+
+      // 2. 将 32-bit (高 24 位有效) 转为 16-bit
+      // 浮点，并施加数字增益(x4.0)以提高唤醒灵敏度 融合左右声道：防止有些劣质
+      // INMP441 模块将 L/R 默认拉高输出到右声道
+      for (int i = 0; i < AUDIO_CHUNK_SAMPLES; i++) {
+        int16_t left_val = (int16_t)(raw_48k_buf[i * 2] >> 16);
+        int16_t right_val = (int16_t)(raw_48k_buf[i * 2 + 1] >> 16);
+
+        l_sum += abs(left_val);
+        r_sum += abs(right_val);
+
+        // 如果左声道是 0，强行用右声道（兼容接反的情况），如果都有声音就混音
+        int16_t mix_val =
+            (left_val == 0 && right_val != 0) ? right_val : left_val;
+
+        // 智能噪声门 (Noise Gate) 与适度增益：
+        // 底噪极其微弱（±15以内）时，直接归零，彻底消灭环境白噪声和电流声！
+        // 这将大幅提高 ASR 的识别准确率，并防止 VAD 误判为持续有人说话。
+        if (mix_val > -100 && mix_val < 100) {
+            pcm_48k_f[i] = 0.0f;
+        } else {
+            // 对有效语音保持 24.0 倍放大，确保 WakeNet 能稳定唤醒，但不过度失真
+            pcm_48k_f[i] = (float)mix_val * 24.0f;
+        }
+      }
+
+      // if (++debug_cnt % 100 == 0) {
+      //   ESP_LOGI(TAG, "🎙️ Mic Energy -> L: %lld, R: %lld", l_sum /
+      //   AUDIO_CHUNK_SAMPLES, r_sum / AUDIO_CHUNK_SAMPLES);
+      // }
+
+      // 3. FIR 抗混叠低通滤波 + 3:1 抽取 (48k -> 16k)
+
+      dsps_fird_f32(&fir_decim_obj, pcm_48k_f, pcm_16k_f,
+
+                    AUDIO_CHUNK_SAMPLES / 3);
+
+      // 4. 浮点转回 16-bit PCM（tanh 软限制，避免硬切爆破音）
+
+      for (int i = 0; i < AUDIO_CHUNK_SAMPLES / 3; i++) {
+
+        float val = pcm_16k_f[i];
+        // tanh 软限制三步曲：
+        //   1) 归一化：val / 32768  →  将 ±32768 映射到 ±1.0
+        //   2) tanh 压缩：tanh(norm)  →  小信号近似线性通过，
+        //                                 大信号渐进平滑到 ±1.0，无陡峭阶跃
+        //   3) 还原：×32767  →  回到 int16 满量程范围
+        // 对比硬切：原来 >32767 直接截断，产生高频咔哒声；
+        //           现在 tanh 平滑过渡，波形连续，无爆破音
+        float norm = val / 32768.0f;
+        if (norm > 3.0f)
+          norm = 3.0f; // tanh(3) ≈ 0.995，已接近饱和
+        if (norm < -3.0f)
+          norm = -3.0f;
+        float limited = tanhf(norm) * 32767.0f;
+        pcm_16k_buf[i] = (int16_t)limited;
+      }
+
+      // 5. 送入 PSRAM 缓冲池，让上层网络慢慢消费
+
+      xRingbufferSend(rx_ringbuf, pcm_16k_buf,
+
+                      (AUDIO_CHUNK_SAMPLES / 3) * sizeof(int16_t), 0);
     }
-    return ESP_OK;
   }
 }
 
-/* ── 扬声器公开 API ─────────────────────────────────────────── */
+// 用于抵御 Ringbuffer 奇数截断错位的终极缝合缓存
 
-/*
- * 播放完整音频缓冲区（一次性）。
- * 流程: 确保 TX 使能 → 全量写入 → 停止 I2S + 关断功放 → 返回。
- * 适用场景: 播放提示音 / 问候语等短音频。
- */
-esp_err_t voice_io_spk_play(const uint8_t *data, size_t len) {
-  if (!data || !len)
-    return ESP_ERR_INVALID_ARG;
-  esp_err_t ret = ensure_tx_on();
-  if (ret != ESP_OK)
-    return ret;
-  ret = write_all(tx_chan, data, len);
-  voice_io_spk_stop(); /* 播放完毕立即静音 */
-  return ret;
-}
+static uint8_t s_leftover_byte = 0;
 
-/*
- * 流式播放音频数据。
- * 不停止 I2S 通道，允许后续继续写入。需与 voice_io_spk_stop() 配对。
- * 适用场景: LLM 实时音频流，连续多次小量写入。
- */
-esp_err_t voice_io_spk_play_stream(const uint8_t *data, size_t len) {
-  if (!data || !len)
-    return ESP_ERR_INVALID_ARG;
-  esp_err_t ret = ensure_tx_on();
-  if (ret != ESP_OK)
-    return ret;
-  return write_all(tx_chan, data, len);
-}
+static bool s_has_leftover = false;
 
-/*
- * 停止扬声器。
- * 流程: 写入 4096 字节静音清空 FIFO → 拉低 SD_MODE 关功放 → 禁用 I2S TX。
- * 可安全重复调用。
- */
-esp_err_t voice_io_spk_stop(void) {
-  if (!tx_enabled)
-    return ESP_OK;
+static void audio_tx_task(void *args) {
 
-  /* 发送静音帧清空 I2S FIFO，避免下一次播放时出现爆音 */
-  uint8_t *silence = calloc(4096, 1);
-  if (silence) {
-    size_t n;
-    i2s_channel_write(tx_chan, silence, 4096, &n, pdMS_TO_TICKS(100));
-    free(silence);
+  // I2S DMA 从 PSRAM 取数据经测试无卡死问题，将 upmix_buf 移到 PSRAM 减轻内置
+  // SRAM 压力
+
+  // 每次最多接收 512 字节(256 个 16-bit 采样)。
+  // 上采样 3 倍后，变成 768 个 16-bit 采样。
+  // 转为双声道 32-bit 后，总字节数为 768 * 8 = 6144 字节。
+  int32_t *upmix_buf =
+      heap_caps_malloc(6144, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  if (!upmix_buf) {
+
+    ESP_LOGE(TAG, "Failed to allocate upmix_buf in PSRAM for TX task");
+
+    vTaskDelete(NULL);
+
+    return;
   }
+
+  // tx_ringbuf 里存的是 16kHz 16-bit Mono 数据
+
+  uint32_t total_bytes_rx = 0;
+
+  uint32_t total_samples_tx = 0;
+
+  uint32_t i2s_err_count = 0;
+
+  TickType_t last_log = xTaskGetTickCount();
+
+  while (1) {
+
+    size_t size;
+
+    // 等待上层写入数据，每次最多接收 512 字节
+
+    uint8_t *raw_data =
+
+        (uint8_t *)xRingbufferReceiveUpTo(tx_ringbuf, &size, pdMS_TO_TICKS(10),
+                                          512);
+
+    if (raw_data) {
+
+      total_bytes_rx += size;
+
+      size_t byte_idx = 0;
+
+      size_t sample_cnt = 0;
+
+      // 护盾第 1 层：如果上次落单了半个字节，且这次有新数据，立刻缝合！
+
+      if (s_has_leftover && size > 0) {
+
+        int16_t assembled = s_leftover_byte | ((uint16_t)raw_data[0] << 8);
+
+        byte_idx = 1;
+
+        s_has_leftover = false;
+
+        // 硬件级全局音量控制
+
+        assembled = (int16_t)((int32_t)assembled * s_spk_volume / 100);
+
+        int32_t val = ((int32_t)assembled) << 16;
+
+        upmix_buf[sample_cnt * 6 + 0] = val;
+
+        upmix_buf[sample_cnt * 6 + 1] = val;
+
+        upmix_buf[sample_cnt * 6 + 2] = val;
+
+        upmix_buf[sample_cnt * 6 + 3] = val;
+
+        upmix_buf[sample_cnt * 6 + 4] = val;
+
+        upmix_buf[sample_cnt * 6 + 5] = val;
+
+        sample_cnt++;
+      }
+
+      // 护盾第 2 层：计算剩下的数据中成对的字节进行处理
+
+      while (byte_idx + 1 < size) {
+
+        int16_t val_16 =
+            raw_data[byte_idx] | ((uint16_t)raw_data[byte_idx + 1] << 8);
+
+        byte_idx += 2;
+
+        // 硬件级全局音量控制
+
+        val_16 = (int16_t)((int32_t)val_16 * s_spk_volume / 100);
+
+        int32_t val = ((int32_t)val_16) << 16;
+
+        upmix_buf[sample_cnt * 6 + 0] = val;
+
+        upmix_buf[sample_cnt * 6 + 1] = val;
+
+        upmix_buf[sample_cnt * 6 + 2] = val;
+
+        upmix_buf[sample_cnt * 6 + 3] = val;
+
+        upmix_buf[sample_cnt * 6 + 4] = val;
+
+        upmix_buf[sample_cnt * 6 + 5] = val;
+
+        sample_cnt++;
+      }
+
+      // 护盾第 3 层：如果末尾多出一个"落单"的奇数字节，把它攥在手里
+
+      if (byte_idx < size) {
+
+        s_leftover_byte = raw_data[byte_idx];
+
+        s_has_leftover = true;
+      }
+
+      // 送入 I2S DMA
+
+      if (sample_cnt > 0) {
+
+        size_t bytes_written = 0;
+
+        esp_err_t err = i2s_channel_write(tx_chan, upmix_buf, sample_cnt * 24,
+
+                                          &bytes_written, pdMS_TO_TICKS(100));
+
+        if (err != ESP_OK) {
+
+          i2s_err_count++;
+
+          if (i2s_err_count <= 3 || i2s_err_count % 100 == 0) {
+
+            ESP_LOGW(TAG, "I2S DMA Write Failed (%lu): %s",
+                     (unsigned long)i2s_err_count, esp_err_to_name(err));
+          }
+        }
+
+        total_samples_tx += sample_cnt;
+      }
+
+      vRingbufferReturnItem(tx_ringbuf, (void *)raw_data);
+    }
+
+    // 每 30 秒打印一次消费速率
+
+    TickType_t now = xTaskGetTickCount();
+
+    if (now - last_log >= pdMS_TO_TICKS(30000)) {
+
+      ESP_LOGI(TAG,
+               "TX stats: %lu KB received, %lu samples sent, %lu I2S errors",
+
+               (unsigned long)(total_bytes_rx / 1024),
+
+               (unsigned long)total_samples_tx,
+
+               (unsigned long)i2s_err_count);
+
+      last_log = now;
+    }
+  }
+}
+
+/* ── 统一全双工初始化逻辑 ────────────────────────────── */
+
+static esp_err_t voice_io_shared_init(uint32_t unused_rate) {
+
+  if (s_i2s_shared_initialized) {
+
+    return ESP_OK;
+  }
+
+  esp_err_t ret;
+
+  uint32_t hw_sample_rate = 48000; // 强制底层硬件 48kHz
+
+  /* 0. 初始化缓冲池与 DSP (PSRAM) */
+
+  size_t rb_size = 64 * 1024; // 64KB 巨大缓冲池
+
+  uint8_t *tx_buf = heap_caps_malloc(rb_size, MALLOC_CAP_SPIRAM);
+
+  StaticRingbuffer_t *tx_struct = heap_caps_malloc(
+
+      sizeof(StaticRingbuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  tx_ringbuf =
+
+      xRingbufferCreateStatic(rb_size, RINGBUF_TYPE_BYTEBUF, tx_buf, tx_struct);
+
+  uint8_t *rx_buf = heap_caps_malloc(rb_size, MALLOC_CAP_SPIRAM);
+
+  StaticRingbuffer_t *rx_struct = heap_caps_malloc(
+
+      sizeof(StaticRingbuffer_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  rx_ringbuf =
+
+      xRingbufferCreateStatic(rb_size, RINGBUF_TYPE_BYTEBUF, rx_buf, rx_struct);
+
+  init_fir_decim();
+
+  /* 1. 初始化 MAX98357A SD_MODE 功放使能管脚（ESP32 原生 GPIO 直驱）
+
+   *    PCF8574 弱上拉无法可靠拉高 SD_MODE（实测 P3 仅 0.15V），改用 GPIO */
+
+#if VA_SPK_SD_PIN >= 0
+
+  gpio_config_t sd_cfg = {
+
+      .pin_bit_mask = BIT64(VA_SPK_SD_PIN),
+
+      .mode = GPIO_MODE_OUTPUT,
+
+      .pull_up_en = GPIO_PULLUP_DISABLE,
+
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+
+      .intr_type = GPIO_INTR_DISABLE,
+
+  };
+
+  gpio_config(&sd_cfg);
+
+  gpio_set_level(VA_SPK_SD_PIN, 0);
+
+  s_amp_enabled = false;
+
   vTaskDelay(pdMS_TO_TICKS(50));
 
-  /* 关断功放 + 禁用通道 */
-#if CONFIG_VA_SPK_SD_PIN >= 0
-  gpio_set_level(CONFIG_VA_SPK_SD_PIN, 0);
+  ESP_LOGI(TAG, "AMP SD_MODE on GPIO %d, initial LOW", VA_SPK_SD_PIN);
+
 #endif
-  vTaskDelay(pdMS_TO_TICKS(10));
-  i2s_channel_disable(tx_chan);
-  tx_enabled = false;
-  ESP_LOGI(TAG, "Speaker stopped");
+
+  /* 2. 同时申请 I2S_NUM_0 的 RX 和 TX 全双工通道 */
+
+  i2s_chan_config_t chan_cfg =
+
+      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+
+  chan_cfg.auto_clear = true;
+
+  // 优化 I2S DMA 缓冲区大小以解决加载 WakeNet 模型后的 SRAM 内存不足问题
+
+  chan_cfg.dma_desc_num = 4;
+
+  chan_cfg.dma_frame_num = 240;
+
+  ret = i2s_new_channel(&chan_cfg, &tx_chan, &rx_chan);
+
+  if (ret != ESP_OK)
+
+    return ret;
+
+  /* 3. 基础配置：32位槽宽，共享 BCLK/WS */
+
+  i2s_std_config_t std_cfg = {
+
+      .clk_cfg =
+
+          {
+
+              .sample_rate_hz = hw_sample_rate,
+
+              .clk_src = I2S_CLK_SRC_DEFAULT,
+
+              .mclk_multiple = I2S_MCLK_MULTIPLE_256,
+
+          },
+
+      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
+
+                                                      I2S_SLOT_MODE_STEREO),
+
+      .gpio_cfg =
+
+          {
+
+              .mclk = I2S_GPIO_UNUSED,
+
+              .bclk = VA_MIC_SCK_PIN,
+
+              .ws = VA_MIC_WS_PIN,
+
+              .dout = VA_SPK_DIN_PIN,
+
+              .din = VA_MIC_SD_PIN,
+
+              .invert_flags = {false, false, false},
+
+          },
+
+  };
+
+  /* 4. 配置 TX (扬声器) */
+  i2s_std_config_t tx_std_cfg = std_cfg;
+  tx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+  tx_std_cfg.gpio_cfg.din =
+      I2S_GPIO_UNUSED; // 扬声器不需要数据输入引脚，避免冲突
+  // 全双工模式下 BCLK/WS 由 RX 主通道驱动，TX 保留相同引脚配置以确保 GPIO
+  // 矩阵正确路由时钟
+  ret = i2s_channel_init_std_mode(tx_chan, &tx_std_cfg);
+
+  if (ret != ESP_OK)
+
+    return ret;
+
+  /* 5. 配置 RX (麦克风) */
+
+  i2s_std_config_t rx_std_cfg = std_cfg;
+
+  rx_std_cfg.slot_cfg.slot_mode =
+      I2S_SLOT_MODE_STEREO; // 配置为立体声以恢复64BCLK，物理上与TX对齐
+
+  rx_std_cfg.slot_cfg.slot_mask =
+      I2S_STD_SLOT_BOTH; // 启用双声道物理掩码，让 ESP-IDF 计算标准的 64 BCLK
+
+  // 共享时钟全双工配置下，RX 麦克风作为主通道，占用物理引脚提供持续时钟
+
+  rx_std_cfg.gpio_cfg.bclk = VA_MIC_SCK_PIN;
+
+  rx_std_cfg.gpio_cfg.ws = VA_MIC_WS_PIN;
+
+  rx_std_cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
+
+  ret = i2s_channel_init_std_mode(rx_chan, &rx_std_cfg);
+
+  if (ret != ESP_OK)
+
+    return ret;
+
+  /* 6. 使能通道 (先使能 Slave TX，后使能 Master RX，保障时钟生成时接收方已就绪)
+   */
+
+  i2s_channel_enable(tx_chan);
+
+  i2s_channel_enable(rx_chan);
+
+  /* ── 硬件诊断：直接读 SD 引脚物理电平 ──
+   * gpio_get_level() 不依赖引脚功能，直接读物理电平。
+   * - 如果一直是 0: INMP441 的 SD 被持续拉低（没通电 / 没时钟 / 芯片坏）
+   * - 如果一直是 1: INMP441 的 SD 被持续拉高（芯片没在输出）
+   * - 如果有 0 有 1: 芯片在输出，但 I2S 同步/格式有问题
+   */
+  {
+    int zeros = 0, ones = 0;
+    for (int i = 0; i < 200; i++) {
+      if (gpio_get_level(VA_MIC_SD_PIN))
+        ones++;
+      else
+        zeros++;
+      esp_rom_delay_us(10);
+    }
+    ESP_LOGI(TAG, "🔍 HW diag: SD(GPIO%d) 200 samples → low=%d, high=%d",
+             VA_MIC_SD_PIN, zeros, ones);
+  }
+
+  /* 7. 创建高优先级搬运任务 (Core 1 避免干扰 Core 0 的 Wi-Fi)
+
+   *    使用 PSRAM 栈避免碎片化的内置 SRAM 无法分配大块连续内存 */
+
+  BaseType_t rx_ret = xTaskCreatePinnedToCoreWithCaps(
+
+      audio_rx_task, "audio_rx", 6144, NULL, configMAX_PRIORITIES - 2, NULL, 1,
+
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (rx_ret != pdPASS) {
+
+    ESP_LOGE(TAG,
+             "FATAL: audio_rx_task creation failed (err %d) — no mic input!",
+             rx_ret);
+  }
+
+  BaseType_t tx_ret = xTaskCreatePinnedToCoreWithCaps(
+
+      audio_tx_task, "audio_tx", 8192, NULL, configMAX_PRIORITIES - 2, NULL, 1,
+
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (tx_ret != pdPASS) {
+
+    ESP_LOGE(
+        TAG,
+        "FATAL: audio_tx_task creation failed (err %d) — no speaker output!",
+        tx_ret);
+  }
+
+  s_i2s_shared_initialized = true;
+
+  ESP_LOGI(TAG, "Professional Duplex I2S initialized (48kHz HW -> 16kHz SW).");
+
+  return ESP_OK;
+}
+
+/* ── 麦克风 API (抽取缓冲池数据) ──────────────────── */
+
+esp_err_t voice_io_mic_init(uint32_t sample_rate, int channel,
+
+                            int bits_per_sample) {
+
+  return voice_io_shared_init(sample_rate);
+}
+
+esp_err_t voice_io_mic_read(bool is_raw, int16_t *buffer, int len) {
+
+  if (!s_i2s_shared_initialized)
+
+    return ESP_ERR_INVALID_STATE;
+
+  size_t received = 0;
+
+  while (received < (size_t)len) {
+
+    size_t size;
+
+    void *data = xRingbufferReceiveUpTo(rx_ringbuf, &size, portMAX_DELAY,
+
+                                        len - received);
+
+    if (data) {
+
+      memcpy((uint8_t *)buffer + received, data, size);
+
+      vRingbufferReturnItem(rx_ringbuf, data);
+
+      received += size;
+    }
+  }
+
+  return ESP_OK;
+}
+
+int voice_io_mic_channel(void) { return 1; }
+
+void voice_io_mic_clear(void) {
+
+  if (!s_i2s_shared_initialized || !rx_ringbuf)
+
+    return;
+
+  size_t size;
+
+  void *item;
+
+  while ((item = xRingbufferReceive(rx_ringbuf, &size, 0)) != NULL) {
+
+    vRingbufferReturnItem(rx_ringbuf, item);
+  }
+
+  ESP_LOGI(TAG, "Mic RX ringbuf cleared");
+}
+
+/* ── 扬声器 API (推入缓冲池) ───────────────────────── */
+
+esp_err_t voice_io_spk_init(uint32_t sample_rate, int channel,
+
+                            int bits_per_sample) {
+
+  return voice_io_shared_init(sample_rate);
+}
+
+static esp_err_t ensure_tx_on(void) {
+
+  if (!s_i2s_shared_initialized)
+
+    return ESP_ERR_INVALID_STATE;
+
+  if (s_amp_enabled)
+
+    return ESP_OK; // 缓存命中
+
+  /* 【关键】功放启动前清空 RingBuffer 脏数据，防止播放第一帧爆出噪音 */
+
+  if (tx_ringbuf) {
+    size_t size;
+    void *item;
+    while ((item = xRingbufferReceive(tx_ringbuf, &size, 0)) != NULL)
+      vRingbufferReturnItem(tx_ringbuf, item);
+  }
+
+#if VA_SPK_SD_PIN >= 0
+
+  // 冷启动复位序列（原生 GPIO 推挽输出，驱动力充足）：
+
+  gpio_set_level(VA_SPK_SD_PIN, 0);
+
+  vTaskDelay(pdMS_TO_TICKS(100));
+
+  gpio_set_level(VA_SPK_SD_PIN, 1);
+
+  vTaskDelay(pdMS_TO_TICKS(50)); // 延长稳定时间，确保功放 PLL 锁相就绪
+
+#else
+
+  /* SD_MODE 接 3.3V 常通时，等一下让 I2S 通道有时间输出静音帧 */
+
+  vTaskDelay(pdMS_TO_TICKS(30));
+
+#endif
+
+  /* 【关键】填充 30ms 静音帧，平滑启动：功放通电后先输出 0 值，避免 DC
+   * 阶跃爆破声 */
+
+  if (tx_ringbuf) {
+    int16_t silence[240]; /* 16kHz 30ms = 480 采样 */
+    for (int i = 0; i < 240; i++)
+      silence[i] = 0;
+    xRingbufferSend(tx_ringbuf, silence, 240 * 2, pdMS_TO_TICKS(50));
+  }
+
+  s_amp_enabled = true;
+
+#if VA_SPK_SD_PIN >= 0
+
+  ESP_LOGI(TAG, "AMP enabled (GPIO %d high)", VA_SPK_SD_PIN);
+
+#else
+
+  ESP_LOGI(TAG, "AMP always-on (SD_MODE floating, no GPIO)");
+
+#endif
+
+  return ESP_OK;
+}
+
+void voice_io_spk_force_reset(void) {
+
+  if (!s_i2s_shared_initialized)
+
+    return;
+
+  s_amp_enabled = false; // 强制清除缓存状态
+
+#if VA_SPK_SD_PIN >= 0
+
+  gpio_set_level(VA_SPK_SD_PIN, 0);
+
+  vTaskDelay(pdMS_TO_TICKS(100)); // 强制物理拉低 100ms 模拟物理断电
+
+  gpio_set_level(VA_SPK_SD_PIN, 1);
+
+  vTaskDelay(pdMS_TO_TICKS(50)); // 延时 50ms 等待 PLL 重新稳定锁相
+
+  s_amp_enabled = true;
+
+  ESP_LOGI(TAG, "Speaker forced hardware reset (anti-shake & PLL lock)");
+
+#else
+
+  ESP_LOGI(TAG, "Speaker always-on (no GPIO control), skip forced reset");
+
+#endif
+}
+
+esp_err_t voice_io_spk_play(const uint8_t *data, size_t len) {
+
+  return voice_io_spk_play_stream(data, len);
+}
+
+esp_err_t voice_io_spk_play_stream(const uint8_t *data, size_t len) {
+
+  if (!data || !len)
+
+    return ESP_ERR_INVALID_ARG;
+
+  esp_err_t ret = ensure_tx_on();
+
+  if (ret != ESP_OK)
+
+    return ret;
+
+  // 分块发送，防止超过 RingBuffer 一次性发送限制
+
+  size_t sent = 0;
+
+  while (sent < len) {
+
+    size_t to_send = len - sent;
+
+    if (to_send > 4096)
+
+      to_send = 4096;
+
+    if (xRingbufferSend(tx_ringbuf, (void *)(data + sent), to_send,
+
+                        pdMS_TO_TICKS(200)) == pdTRUE) {
+
+      sent += to_send;
+
+    } else {
+
+      return ESP_ERR_TIMEOUT;
+    }
+  }
+
+  return ESP_OK;
+}
+
+esp_err_t voice_io_spk_stop(void) {
+
+  if (!s_i2s_shared_initialized)
+
+    return ESP_OK;
+
+  /* 播放结束：输出 50ms 静音淡出 → 避免突然切断产生爆破声 */
+  if (tx_ringbuf) {
+    int16_t silence[400]; /* 16kHz 50ms = 800 采样 */
+    for (int i = 0; i < 400; i++)
+      silence[i] = 0;
+    xRingbufferSend(tx_ringbuf, silence, 400 * 2, pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(50)); /* 等静音帧播完 */
+  }
+
+#if VA_SPK_SD_PIN >= 0
+
+  gpio_set_level(VA_SPK_SD_PIN, 0);
+
+#endif
+
+  /* 【关键】每次 stop 都重置 amp_enabled 标志，
+   * 确保下次播放重新跑初始化序列（清 ringbuf + 静音填充） */
+  s_amp_enabled = false;
+
+  // 【重要】扔掉手里攥着的半个脏字节，防止污染下一次播放
+
+  s_has_leftover = false;
+
+  s_leftover_byte = 0;
+
+  // 清空 Ringbuffer 残余数据
+  if (tx_ringbuf) {
+    size_t size;
+    void *item;
+    while ((item = xRingbufferReceive(tx_ringbuf, &size, 0)) != NULL) {
+      vRingbufferReturnItem(tx_ringbuf, item);
+    }
+  }
+
+  ESP_LOGI(TAG, "Speaker stopped, buffers flushed");
+
   return ESP_OK;
 }

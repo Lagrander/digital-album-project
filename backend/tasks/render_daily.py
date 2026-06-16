@@ -24,7 +24,8 @@ import json
 import datetime as dt
 import struct
 from typing import List, Dict, Any, Tuple, Optional
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 import config as cfg
 
 TODAY = dt.date.today()
@@ -389,19 +390,23 @@ def main():
         print(f"[INFO] 第 {idx} 张: {chosen['path']}")
         print(f"[INFO]   日期: {chosen['date']}  回忆度: {chosen['memory']}")
 
-        img = render_image(chosen)
+        try:
+            img = render_image(chosen)
 
-        # 保存 JPEG 预览
-        preview_path = BIN_OUTPUT_DIR / f"preview_{chosen['id']}.jpg"
-        img.save(preview_path, "JPEG", quality=85)
-        print(f"[OK] 预览: {preview_path}")
+            # 保存 JPEG 预览
+            preview_path = BIN_OUTPUT_DIR / f"preview_{chosen['id']}.jpg"
+            img.save(preview_path, "JPEG", quality=85)
+            print(f"[OK] 预览: {preview_path}")
 
-        # 输出 RGB565
-        rgb565_data = image_to_rgb565(img)
-        rgb565_path = BIN_OUTPUT_DIR / f"photo_{chosen['id']}.rgb565"
-        with open(rgb565_path, "wb") as f:
-            f.write(rgb565_data)
-        print(f"[OK] RGB565: {rgb565_path} ({len(rgb565_data)} bytes)")
+            # 输出 RGB565
+            rgb565_data = image_to_rgb565(img)
+            rgb565_path = BIN_OUTPUT_DIR / f"photo_{chosen['id']}.rgb565"
+            with open(rgb565_path, "wb") as f:
+                f.write(rgb565_data)
+            print(f"[OK] RGB565: {rgb565_path} ({len(rgb565_data)} bytes)")
+        except Exception as e:
+            print(f"[ERROR] 渲染图片 {chosen['path']} 失败: {e}", file=sys.stderr)
+            continue
 
     # 兼容 latest.*
     first_rgb565 = BIN_OUTPUT_DIR / "photo_0.rgb565"

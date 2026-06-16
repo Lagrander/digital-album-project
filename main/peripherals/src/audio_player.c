@@ -1,3 +1,13 @@
+/**
+ * @file audio_player.c
+ * @brief MP3 本地文件系统硬解码与播放引擎
+ *
+ * @architecture
+ * 本模块负责高品质立体声 MP3 的解压与 I2S 下发。
+ * 核心优化：
+ * 将 minimp3 的核心状态机与热点读写缓存强制放置在极速的内置 SRAM (MALLOC_CAP_INTERNAL) 中，
+ * 彻底规避了高采样率音频在 PSRAM 解码时造成的外设总线饥饿问题（LoadProhibited 异常）。
+ */
 #include "audio_player.h"
 
 #include <stdio.h>

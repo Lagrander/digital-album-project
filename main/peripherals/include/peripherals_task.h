@@ -31,6 +31,21 @@ void peripherals_mist_off(void);
 /** 查询雾化器状态（任意一路开则返回 true） */
 bool peripherals_mist_is_on(void);
 
+/** 设置指定通道的雾化开关与强度 */
+void peripherals_set_aroma(int channel, bool on, int level);
+
+/** 加大当前活跃通道的喷雾强度（1→2→3） */
+void peripherals_mist_level_up(void);
+
+/** 减小当前活跃通道的喷雾强度（3→2→1） */
+void peripherals_mist_level_down(void);
+
+/** 查询是否因湿度过高被强制关闭 */
+bool peripherals_is_humidity_blocked(void);
+
+/** 字符串通道名→索引映射（"mint"→0, "jasmine"→1, "rose"→2） */
+int peripherals_mist_channel_from_string(const char *ch_str);
+
 #ifdef __cplusplus
 }
 #endif

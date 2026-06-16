@@ -58,6 +58,7 @@ typedef struct {
     size_t   stream_write;       /* 写指针（生产者: WS 回调）         */
     size_t   stream_read;        /* 读指针（消费者: 播放线程）        */
     bool     streaming;          /* 是否处于流式播放状态              */
+    bool     is_playing;         /* 是否正在播放音频（TTS/音乐）        */
 } audio_buf_t;
 
 /* ── 生命周期 ───────────────────────────────────────────────── */

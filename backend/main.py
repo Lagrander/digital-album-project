@@ -126,18 +126,131 @@ def run_script(script_path: str, description: str) -> bool:
         print(f"\n❌ 发生严重异常: {e}")
         return False
 
+def get_physical_wifi_ip() -> str:
+    """获取最有可能的物理局域网无线 IP，自动过滤虚拟网卡"""
+    import re
+    try:
+        res = subprocess.run("ipconfig", shell=True, capture_output=True, text=True, encoding="gbk", errors="ignore")
+        blocks = re.split(r'\n(?=[^\s])', res.stdout)
+        for block in blocks:
+            block_lower = block.lower()
+            if any(kw in block_lower for kw in ["vmware", "virtualbox", "host-only", "vethernet"]):
+                continue
+            ips = re.findall(r"IPv4[^\d\n]+([0-9\.]+)", block)
+            for ip in ips:
+                if ip != "127.0.0.1" and not ip.startswith("198.18"):
+                    if ip.startswith("192.168") or ip.startswith("10.") or ip.startswith("172."):
+                        return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+def sync_esp32_ip(new_ip: str):
+    """自动批量写入 sdkconfig, sdkconfig.defaults, Kconfig.projbuild 的 IP 配置"""
+    import re
+    workspace_root = ROOT_DIR.parent
+    sdk_path = workspace_root / "sdkconfig"
+    defaults_path = workspace_root / "sdkconfig.defaults"
+    kconfig_path = workspace_root / "main" / "Kconfig.projbuild"
+
+    def update_file(file_path, new_ip):
+        p = Path(file_path)
+        if not p.exists():
+            return False
+        content = p.read_text(encoding='utf-8', errors='ignore')
+        
+        # 1. 替换 CONFIG_SERVER_URL 或者相关的默认值 (匹配 8765 端口)
+        pattern_http = r'(CONFIG_SERVER_URL\s*=\s*\"http://|default\s*\"http://)[^:\"]+(:8765\")'
+        new_content, count_http = re.subn(pattern_http, rf'\g<1>{new_ip}\g<2>', content)
+
+        # 2. 替换 CONFIG_VA_WS_URI 或者相关的默认值 (匹配 8888 端口)
+        pattern_ws = r'(CONFIG_VA_WS_URI\s*=\s*\"ws://|default\s*\"ws://)[^:\"]+(:8888\")'
+        new_content, count_ws = re.subn(pattern_ws, rf'\g<1>{new_ip}\g<2>', new_content)
+
+        if count_http > 0 or count_ws > 0:
+            p.write_text(new_content, encoding='utf-8')
+            print(f"   [OK] 已更新 {p.name} 的 IP 配置 -> {new_ip}")
+            return True
+        return False
+
+    print(f"\n🔄 正在同步 ESP32 配置文件至新 IP: {new_ip} ...")
+    update_file(sdk_path, new_ip)
+    update_file(defaults_path, new_ip)
+    update_file(kconfig_path, new_ip)
+    print("✨ 同步完成！注意：如果修改了配置，请记得重新烧录 ESP32 以生效：")
+    print("   idf.py build flash\n")
+
 def start_server():
     """启动 Flask 核心服务"""
-    local_ip = get_local_ip()
-    port = get_current_port()
-    print(f"\n🚀 正在拉起相册主 Web 服务器 (server.py)...")
-    print(f"🔗 预计设备连接地址: http://{local_ip}:{port}")
+    import re
+    suggested_ip = get_physical_wifi_ip()
+    print("\n" + "=" * 60)
+    print(" 📢 ESP32 局域网 IP 配置与对齐".center(56))
+    print("=" * 60)
+    print(f" 检测到您当前最可能的物理局域网 IP 为: {suggested_ip}")
+    print(" 对应配置文件包含:")
+    print("   1. sdkconfig")
+    print("   2. sdkconfig.defaults")
+    print("   3. main/Kconfig.projbuild")
+    print("-" * 60)
+    print(" 💡 提示：若您的 ESP32 需要连接此电脑，请确保 IP 与其配置一致。")
+    print("          直接按回车确认使用默认值，或输入指定的物理 IP，输入 0 跳过修改。")
+    try:
+        user_ip = input(f"👉 请输入您的电脑 IP [{suggested_ip}]: ").strip()
+    except KeyboardInterrupt:
+        user_ip = "0"
+    
+    if not user_ip:
+        user_ip = suggested_ip
+        
+    if user_ip != "0":
+        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", user_ip):
+            sync_esp32_ip(user_ip)
+        else:
+            print("❌ 输入的 IP 格式不正确，跳过自动配置。")
+    else:
+        print("⏭️ 已跳过修改 ESP32 配置文件。")
+        
+    print("\n🚀 正在自动拉起语音助理 WebSocket 服务器 (voice_server.py)...")
+    
+    # 强制清理占用 8888 端口的残留进程
+    try:
+        import os
+        res = subprocess.run("netstat -ano | findstr :8888", shell=True, capture_output=True, text=True)
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and "LISTENING" in line:
+                pid = parts[-1]
+                if int(pid) != os.getpid():
+                    subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True)
+                    print(f"   [CLEAN] 已强行终止占用 8888 端口的假死残留进程 (PID: {pid})")
+    except Exception as e:
+        print(f"   [CLEAN] 端口清理失败: {e}")
+
+    voice_proc = None
+    try:
+        # 异步后台唤醒 voice_server.py
+        voice_proc = subprocess.Popen([sys.executable, str(ROOT_DIR / "services" / "voice_server.py")], cwd=ROOT_DIR)
+        print("   [OK] 语音服务器已启动在端口 8888。")
+    except Exception as e:
+        print(f"   [WARN] 无法自动启动语音服务: {e}")
+
+    print("\n🚀 正在拉起相册主 Web 服务器 (server.py)...")
     print("💡 提示：按 Ctrl+C 可停止服务器并退出程序。")
     print("=" * 60 + "\n")
     try:
         subprocess.run([sys.executable, str(ROOT_DIR / "server.py")], cwd=ROOT_DIR)
     except KeyboardInterrupt:
         print("\n\n👋 服务器已关闭。")
+    finally:
+        if voice_proc:
+            print("🛑 正在关闭语音助手服务器...")
+            try:
+                voice_proc.terminate()
+                voice_proc.wait(timeout=2)
+            except Exception:
+                pass
+            print("👋 语音服务器已安全退出。")
 
 def main():
     while True:

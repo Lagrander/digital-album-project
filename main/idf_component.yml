@@ -12,3 +12,4 @@ dependencies:
   espressif/esp_lvgl_port: ^2.8.0
   espressif/esp-sr: ^2.1.0
   espressif/esp_websocket_client: '*'
+  espressif/esp-dsp: ^1.4.11

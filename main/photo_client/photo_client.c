@@ -124,10 +124,32 @@ cleanup:
  * @param count  用于输出成功获取的照片数量的指针
  * @return esp_err_t 返回 ESP_OK 获取成功，或其它错误码
  */
+static char s_photo_tag[64] = {0};
+
+void photo_client_set_tag(const char *tag)
+{
+    if (tag) {
+        strncpy(s_photo_tag, tag, sizeof(s_photo_tag) - 1);
+        s_photo_tag[sizeof(s_photo_tag) - 1] = '\0';
+    } else {
+        s_photo_tag[0] = '\0';
+    }
+    ESP_LOGI(TAG, "Photo tag filter set to: %s", s_photo_tag);
+}
+
+const char *photo_client_get_tag(void)
+{
+    return s_photo_tag;
+}
+
 esp_err_t photo_client_fetch_today(photo_metadata_t *photos, int *count)
 {
     char url[512];
-    snprintf(url, sizeof(url), "%s/api/today", g_server_url);
+    if (strlen(s_photo_tag) > 0) {
+        snprintf(url, sizeof(url), "%s/api/today?tag=%s", g_server_url, s_photo_tag);
+    } else {
+        snprintf(url, sizeof(url), "%s/api/today", g_server_url);
+    }
 
     uint8_t *json_buf = NULL;
     size_t json_len = 0;
@@ -415,6 +437,10 @@ esp_err_t photo_client_fetch_command(device_command_t *cmd_out)
         if (channel) cmd_out->channel = channel->valueint;
         cJSON *state = cJSON_GetObjectItem(cmd_obj, "state");
         if (state) cmd_out->state = state->valueint;
+        cJSON *text = cJSON_GetObjectItem(cmd_obj, "text");
+        if (text && text->valuestring) {
+            strncpy(cmd_out->text, text->valuestring, sizeof(cmd_out->text) - 1);
+        }
     }
 
     cJSON_Delete(root);

@@ -435,49 +435,9 @@ function initDevicePage() {
     }
 }
 
-// 5. Dialogs 页面：智能助手聊天
+// 5. Dialogs 页面：智能助手聊天（已由 dialogs.html 内联 SSE 脚本接管，此处留空）
 function initDialogsPage() {
-    const sendBtn = document.getElementById('btn-send');
-    if (!sendBtn) return;
-
-    const input = document.getElementById('chat-input');
-    const msgBox = document.getElementById('chat-messages');
-
-    const appendMsg = (sender, text) => {
-        const div = document.createElement('div');
-        div.className = `msg-bubble ${sender === 'user' ? 'msg-user' : 'msg-ai'}`;
-        div.textContent = text;
-        msgBox.appendChild(div);
-        msgBox.scrollTop = msgBox.scrollHeight;
-    };
-
-    const sendMsg = async () => {
-        const text = input.value.trim();
-        if(!text) return;
-        input.value = '';
-        appendMsg('user', text);
-
-        sendBtn.disabled = true;
-        const res = await fetch('/api/dialogs/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text })
-        });
-        const data = await res.json();
-        if(data.ok) {
-            appendMsg('ai', data.reply);
-            if(data.aroma_change) {
-                // 刷新页面，让 timeline 自动重新获取
-                setTimeout(() => document.location.reload(), 2000);
-            }
-        }
-        sendBtn.disabled = false;
-    };
-
-    sendBtn.addEventListener('click', sendMsg);
-    input.addEventListener('keydown', e => {
-        if(e.key === 'Enter') sendMsg();
-    });
+    // 逻辑已迁移到 dialogs.html 内联 <script> 中，通过 SSE 实时接收 AI 回复
 }
 
 // 全局初始化

@@ -113,6 +113,9 @@ esp_err_t aht20_get_latest(float *temp, float *hum) {
  * 阻塞发起 I2C 读取，成功后更新内部温湿度缓存变量。
  */
 void peripheral_aht20() {
+  if (!aht20_initialized || aht20 == NULL) {
+    return;
+  }
   esp_err_t ret = ESP_FAIL;
   i2c_bus_lock();
 
@@ -135,9 +138,9 @@ void peripheral_aht20() {
     g_latest_hum = humidity;
     g_data_valid = true;
 
-    // 每读取 6 次才打印 1 次（大约每 4 秒打印一次），降低刷屏频率
+    // 降低刷屏频率（大约每 20 秒打印一次）
     static int print_counter = 0;
-    if (++print_counter >= 10) {
+    if (++print_counter >= 50) {
       ESP_LOGI(TAG, "humidity: %2.2f %%  temperature: %2.2f degC", humidity,
                temperature);
       print_counter = 0;

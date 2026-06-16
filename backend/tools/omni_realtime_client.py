@@ -149,13 +149,14 @@ class OmniRealtimeClient:
         append_event = {"type": "input_audio_buffer.append", "audio": audio_b64}
         await self.send_event(append_event)
 
-    async def create_response(self) -> None:
-        system_prompt = self._load_system_prompt()
+    async def create_response(self, instructions: Optional[str] = None) -> None:
+        if instructions is None:
+            instructions = self._load_system_prompt()
 
         event = {
             "type": "response.create",
             "response": {
-                "instructions": system_prompt,
+                "instructions": instructions,
                 "modalities": ["text", "audio"],
             },
         }

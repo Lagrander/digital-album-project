@@ -31,4 +31,9 @@ esp_err_t mpu6050_read_accel(int16_t *x, int16_t *y, int16_t *z);
  */
 void peripheral_mpu6050(void);
 
+/**
+ * @brief 获取最近一次缓存的 MPU6050 加速度值
+ */
+esp_err_t mpu6050_get_latest_accel(int16_t *x, int16_t *y, int16_t *z);
+
 #endif

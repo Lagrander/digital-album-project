@@ -41,24 +41,23 @@
 
 {% block extra_js %}
 <script>
-    // 渲染时间轴
-    document.addEventListener('DOMContentLoaded', async () => {
+    // ─── 历史记录渲染 ───────────────────────────────────────────────
+    async function loadTimeline() {
         const tlContainer = document.getElementById('timeline-container');
         try {
-            const res = await fetch('/api/dialogs/history');
+            const res = await fetch('/api/dialogs/history?t=' + new Date().getTime());
             const data = await res.json();
-            
-            if(data.history && data.history.length > 0) {
-                // 绑定清空记录事件
-                document.getElementById('clear-dialogs-btn')?.addEventListener('click', async () => {
-                    if(!confirm('确定要清空所有的历史交互记录吗？此操作不可恢复。')) return;
-                    await fetch('/api/dialogs/clear', { method: 'POST' });
-                    document.location.reload();
-                });
-                
-                // 将历史记录倒序展示（最新在上）
+            if (data.history && data.history.length > 0) {
+                const clearBtn = document.getElementById('clear-dialogs-btn');
+                if (clearBtn && !clearBtn.hasAttribute('data-bound')) {
+                    clearBtn.setAttribute('data-bound', 'true');
+                    clearBtn.addEventListener('click', async () => {
+                        if (!confirm('确定要清空所有的历史交互记录吗？此操作不可恢复。')) return;
+                        await fetch('/api/dialogs/clear', { method: 'POST' });
+                        tlContainer.innerHTML = '<div style="color:var(--muted); font-size:0.9rem;">暂无交互记录，试着在左侧说点什么吧。</div>';
+                    });
+                }
                 const reversed = data.history.slice().reverse();
-                
                 tlContainer.innerHTML = reversed.map(h => {
                     const isAi = h.sender === 'ai';
                     return `
@@ -76,6 +75,137 @@
         } catch(e) {
             tlContainer.innerHTML = '<div style="color:var(--danger); font-size:0.9rem;">加载交互记录失败。</div>';
         }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        await loadTimeline();
+
+        // ─── SSE 实时监听 AI 回复 ────────────────────────────────
+        startSSEListener();
+    });
+
+    let _pendingAiBubble = null; // 当前"正在思考"气泡引用
+
+    function startSSEListener() {
+        const evtSource = new EventSource('/api/dialogs/stream');
+        evtSource.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                if (data.type === 'heartbeat') return;
+                if (data.type === 'ai_reply' && data.reply) {
+                    if (_pendingAiBubble) {
+                        // 把"正在思考..."替换为真正的 AI 回复内容
+                        _pendingAiBubble.innerHTML = escapeHtml(data.reply);
+                        _pendingAiBubble.classList.remove('thinking');
+                        _pendingAiBubble = null;
+                    } else {
+                        appendMsg('ai', data.reply);
+                    }
+                    scrollToBottom();
+                    loadTimeline(); // 刷新右侧历史记录
+                }
+            } catch(err) {}
+        };
+        evtSource.onerror = () => {
+            // 连接断开后，3 秒后自动重连
+            evtSource.close();
+            setTimeout(startSSEListener, 3000);
+        };
+    }
+
+    function escapeHtml(text) {
+        const d = document.createElement('div');
+        d.textContent = text;
+        return d.innerHTML;
+    }
+
+    function scrollToBottom() {
+        const msgBox = document.getElementById('chat-messages');
+        if (msgBox) msgBox.scrollTop = msgBox.scrollHeight;
+    }
+
+    // ─── 聊天气泡 ────────────────────────────────────────────────
+    const appendMsg = (sender, text) => {
+        const msgBox = document.getElementById('chat-messages');
+        const div = document.createElement('div');
+        div.className = `msg-bubble ${sender === 'user' ? 'msg-user' : 'msg-ai'}`;
+        div.textContent = text;
+        msgBox.appendChild(div);
+        scrollToBottom();
+        return div;
+    };
+
+    // ─── 发送逻辑 ─────────────────────────────────────────────────
+    const sendBtn = document.getElementById('btn-send');
+    const input = document.getElementById('chat-input');
+
+    const sendMsg = async () => {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = '';
+
+        appendMsg('user', text);
+        sendBtn.disabled = true;
+
+        try {
+            const res = await fetch('/api/dialogs/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text })
+            });
+            const data = await res.json();
+            
+            // 收到后端回复后再创建 AI 气泡
+            const deliveredBubble = appendMsg('ai', '');
+            
+            if (data.ok || data.delivered) {
+                deliveredBubble.innerHTML = '✅ 已送达，正在思考中... <a href="#" class="cancel-btn" style="color:var(--danger); font-size:0.85rem; margin-left:12px; text-decoration:underline;">撤回</a>';
+                deliveredBubble.classList.add('thinking');
+                deliveredBubble.style.opacity = '0.7';
+                deliveredBubble.style.fontStyle = 'italic';
+                _pendingAiBubble = deliveredBubble;
+
+                // 绑定撤回事件
+                const cancelBtn = deliveredBubble.querySelector('.cancel-btn');
+                if (cancelBtn) {
+                    cancelBtn.onclick = async (e) => {
+                        e.preventDefault();
+                        deliveredBubble.innerHTML = '🚫 已撤回';
+                        deliveredBubble.classList.remove('thinking');
+                        deliveredBubble.style.opacity = '0.5';
+                        _pendingAiBubble = null; // 取消挂起状态，忽略后续回来的 SSE
+                        try {
+                            await fetch('/api/dialogs/cancel', { method: 'POST' });
+                        } catch(err) {}
+                    };
+                }
+                loadTimeline(); // 刷新右侧历史记录显示用户刚刚的话
+            } else {
+                // 发送失败，设备离线等
+                deliveredBubble.textContent = data.error ? `❌ ${data.error}` : '❌ 发送失败，请检查设备连接。';
+                deliveredBubble.style.color = 'var(--danger)';
+            }
+        } catch (error) {
+            const deliveredBubble = appendMsg('ai', '❌ 网络异常，发送失败。');
+            deliveredBubble.style.color = 'var(--danger)';
+        } finally {
+            sendBtn.disabled = false;
+        }
+    };
+
+    if (sendBtn) sendBtn.addEventListener('click', sendMsg);
+    if (input) input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') sendMsg();
     });
 </script>
+<style>
+    @keyframes thinking-pulse {
+        0%, 100% { opacity: 0.7; }
+        50% { opacity: 0.4; }
+    }
+    .msg-bubble.thinking {
+        animation: thinking-pulse 1.2s ease-in-out infinite;
+    }
+</style>
 {% endblock %}
+

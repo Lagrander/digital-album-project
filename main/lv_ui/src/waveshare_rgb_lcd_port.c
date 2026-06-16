@@ -209,6 +209,23 @@ esp_err_t wavesahre_rgb_lcd_bl_off() {
   return (ret1 == ESP_OK && ret2 == ESP_OK) ? ESP_OK : ESP_FAIL;
 }
 
+/* ── 软件亮度控制（CH422G 无硬件 PWM，0=关 >0=开）─────────────── */
+
+static uint8_t g_bl_brightness = 100;
+
+void waveshare_rgb_lcd_bl_set_brightness(uint8_t pct) {
+  g_bl_brightness = (pct > 100) ? 100 : pct;
+  if (g_bl_brightness == 0) {
+    wavesahre_rgb_lcd_bl_off();
+  } else {
+    wavesahre_rgb_lcd_bl_on();
+  }
+}
+
+uint8_t waveshare_rgb_lcd_bl_get_brightness(void) {
+  return g_bl_brightness;
+}
+
 /******************************* Example code
  * **************************************/
 static void draw_event_cb(lv_event_t *e) // Draw event callback function

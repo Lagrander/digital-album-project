@@ -73,6 +73,7 @@ esp_err_t net_mgr_init(void) {
   s_sta_netif = esp_netif_create_default_wifi_sta();
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  cfg.nvs_enable = false; // 禁用 Wi-Fi 自动擦写 NVS，防止写入失败触发 Cache stall 锁死总线
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
   ESP_ERROR_CHECK(esp_event_handler_instance_register(
@@ -90,6 +91,9 @@ esp_err_t net_mgr_init(void) {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
   ESP_ERROR_CHECK(esp_wifi_start());
+
+  // 关闭 Wi-Fi 省电模式，确保实时 WebSocket 数据流的高吞吐与极低延迟
+  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
   ESP_LOGI(TAG, "Wi-Fi STA init done, SSID=%s", CONFIG_WIFI_SSID);
   return ESP_OK;

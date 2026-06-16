@@ -1,8 +1,11 @@
 /**
  * @file pcf8574_io.c
- * @brief 提供基于 I2C 的 PCF8574 I/O 扩展芯片驱动。
+ * @brief I2C 低速 GPIO 扩展与多核并发锁机制引擎
  *
- * 管理扩展 IO 引脚的读写，使用互斥锁确保在多线程环境下操作 I2C 总线的安全性。
+ * @architecture
+ * 本文件对 PCF8574 芯片进行抽象，用于缓解 ESP32 核心 GPIO 紧张问题。
+ * 1. 并发安全机制：内置 FreeRTOS 互斥锁 s_mutex，彻底解决 Core 0 的 UI 采样任务与 Core 1 的香薰控制任务并发竞争 I2C 总线造成的宕机问题。
+ * 2. 物理防抖：在上电瞬间写入 0xFF (释放引脚为弱上拉)，防止 HE30 或其他大负载开机误导通。
  */
 #include "pcf8574_io.h"
 #include "tca9548a.h"

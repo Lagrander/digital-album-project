@@ -11,7 +11,9 @@ void i2c_bus_mutex_init(void) { s_i2c_bus_mutex = xSemaphoreCreateMutex(); }
 
 void i2c_bus_lock(void) {
   if (s_i2c_bus_mutex != NULL) {
-    xSemaphoreTake(s_i2c_bus_mutex, portMAX_DELAY);
+    if (xSemaphoreTake(s_i2c_bus_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+      ESP_LOGW("I2C_BUS", "I2C mutex timeout (100ms) — possible deadlock or slow transaction");
+    }
   }
 }
 

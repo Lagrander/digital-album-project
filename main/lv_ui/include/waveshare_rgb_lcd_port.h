@@ -77,6 +77,10 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init();
 esp_err_t wavesahre_rgb_lcd_bl_on();
 esp_err_t wavesahre_rgb_lcd_bl_off();
 
+/** 设置背光亮度 (0-100)，软件 PWM */
+void waveshare_rgb_lcd_bl_set_brightness(uint8_t pct);
+uint8_t waveshare_rgb_lcd_bl_get_brightness(void);
+
 void example_lvgl_demo_ui();
 
 #endif
